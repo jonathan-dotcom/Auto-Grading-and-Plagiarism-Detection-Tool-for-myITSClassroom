@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{{ title }}</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            color: #333;
+        }
+        h1, h2, h3 {
+            color: #2c3e50;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .header {
+            background-color: #3498db;
+            color: white;
+            padding: 20px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        .summary {
+            background-color: #f8f9fa;
+            border-left: 5px solid #3498db;
+            padding: 15px;
+            margin: 20px 0;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 12px;
+            text-align: left;
+        }
+        th {
+            background-color: #3498db;
+            color: white;
+        }
+        tr:nth-child(even) {
+            background-color: #f2f2f2;
+        }
+        tr:hover {
+            background-color: #e9f7fe;
+        }
+        .flagged {
+            background-color: #ffe6e6;
+        }
+        .flagged:hover {
+            background-color: #ffcccc;
+        }
+        .details {
+            font-size: 14px;
+            color: #666;
+        }
+        footer {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #eee;
+            text-align: center;
+            font-size: 12px;
+            color: #999;
+        }
+        .similarity-scale {
+            display: flex;
+            margin: 20px 0;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            overflow: hidden;
+        }
+        .scale-item {
+            flex: 1;
+            text-align: center;
+            padding: 10px;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>{{ title }}</h1>
+            <p>Generated on {{ date }}</p>
+        </div>
+
+        <div class="summary">
+            <h2>Summary</h2>
+            <p><strong>Assignment:</strong> {{ assignment_name }}</p>
+            <p><strong>Total Submissions:</strong> {{ report.total_submissions }}</p>
+            <p><strong>Flagged Pairs:</strong> {{ report.flagged_pairs }}</p>
+            <p><strong>Flagged Students:</strong> {{ report.flagged_students }}</p>
+            <p><strong>Similarity Threshold:</strong> {{ report.threshold * 100 }}%</p>
+        </div>
+
+        <h2>Similarity Scale</h2>
+        <div class="similarity-scale">
+            <div class="scale-item" style="background-color: #c6dbef;">0-20%</div>
+            <div class="scale-item" style="background-color: #9ecae1;">20-40%</div>
+            <div class="scale-item" style="background-color: #6baed6;">40-60%</div>
+            <div class="scale-item" style="background-color: #3182bd;">60-80%</div>
+            <div class="scale-item" style="background-color: #08519c;">80-100%</div>
+        </div>
+
+        <h2>Similarity Results</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Student 1</th>
+                    <th>Student 2</th>
+                    <th>Similarity</th>
+                    <th>Details</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for result in report.results %}
+                <tr {% if result.flagged %}class="flagged"{% endif %}>
+                    <td>
+                        <strong>{{ result.student1_name }}</strong><br>
+                        <span class="details">ID: {{ result.student1_id }}</span><br>
+                        <span class="details">File: {{ result.student1_file }}</span>
+                    </td>
+                    <td>
+                        <strong>{{ result.student2_name }}</strong><br>
+                        <span class="details">ID: {{ result.student2_id }}</span><br>
+                        <span class="details">File: {{ result.student2_file }}</span>
+                    </td>
+                    <td style="text-align: center;
+                               background-color: {% if result.similarity < 0.2 %}#c6dbef
+                                              {% elif result.similarity < 0.4 %}#9ecae1
+                                              {% elif result.similarity < 0.6 %}#6baed6
+                                              {% elif result.similarity < 0.8 %}#3182bd
+                                              {% else %}#08519c{% endif %};
+                               color: {% if result.similarity < 0.6 %}black{% else %}white{% endif %};">
+                        <strong>{{ (result.similarity * 100) | round(2) }}%</strong>
+                    </td>
+                    <td>
+                        {% if result.token_similarity is defined %}
+                        <p><strong>Token similarity:</strong> {{ (result.token_similarity * 100) | round(2) }}%</p>
+                        <p><strong>AST similarity:</strong> {{ (result.ast_similarity * 100) | round(2) }}%</p>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+
+        <footer>
+            <p>Generated by MyITS Auto-Grader & Plagiarism Detection Tool</p>
+            <p>© {{ date.split('-')[0] }} MyITS Auto-Grader Team</p>
+        </footer>
+    </div>
+</body>
+</html>

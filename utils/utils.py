@@ -38,4 +38,4 @@ def navigate_to_page(page):
         page (str): Target page to navigate to.
     """
     st.session_state.current_page = page
-    st.experimental_rerun()
+    st.rerun()

@@ -246,49 +246,52 @@ def render_grading_page():
 
                         # Store in session state
                         st.session_state.grading_results = results
+                        # Also store for this specific assignment type
+                        st.session_state.essay_grading_results = results
 
                         # Show success message
                         st.success(f"Successfully graded {len(results)} essay submissions!")
 
-                        # Display results
-                        if results:
-                            result_data = []
-                            for result in results:
-                                result_data.append({
-                                    'Student ID': result['student_id'],
-                                    'Student Name': result['student_name'],
-                                    'Points': result['grade']['points'],
-                                    'Percentage': f"{result['grade']['percentage']}%",
-                                    'Similarity': f"{result['grade']['similarity'] * 100:.2f}%"
-                                })
+            # Display results - outside the form
+            if 'essay_grading_results' in st.session_state and st.session_state.essay_grading_results:
+                results = st.session_state.essay_grading_results
+                result_data = []
+                for result in results:
+                    result_data.append({
+                        'Student ID': result['student_id'],
+                        'Student Name': result['student_name'],
+                        'Points': result['grade']['points'],
+                        'Percentage': f"{result['grade']['percentage']}%",
+                        'Similarity': f"{result['grade']['similarity'] * 100:.2f}%"
+                    })
 
-                            # Create DataFrame and display
-                            result_df = pd.DataFrame(result_data)
-                            st.dataframe(result_df)
+                # Create DataFrame and display
+                result_df = pd.DataFrame(result_data)
+                st.dataframe(result_df)
 
-                            # Calculate statistics
-                            avg_grade = sum(r['grade']['points'] for r in results) / len(results)
-                            max_grade = max(r['grade']['points'] for r in results)
-                            min_grade = min(r['grade']['points'] for r in results)
+                # Calculate statistics
+                avg_grade = sum(r['grade']['points'] for r in results) / len(results)
+                max_grade = max(r['grade']['points'] for r in results)
+                min_grade = min(r['grade']['points'] for r in results)
 
-                            # Display statistics
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                st.metric("Average Grade", f"{avg_grade:.2f}")
-                            with col2:
-                                st.metric("Highest Grade", f"{max_grade:.2f}")
-                            with col3:
-                                st.metric("Lowest Grade", f"{min_grade:.2f}")
+                # Display statistics
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Average Grade", f"{avg_grade:.2f}")
+                with col2:
+                    st.metric("Highest Grade", f"{max_grade:.2f}")
+                with col3:
+                    st.metric("Lowest Grade", f"{min_grade:.2f}")
 
-                            # Create grade distribution chart
-                            grades = [r['grade']['points'] for r in results]
-                            fig = px.histogram(
-                                x=grades,
-                                nbins=10,
-                                labels={'x': 'Points', 'y': 'Count'},
-                                title='Grade Distribution'
-                            )
-                            st.plotly_chart(fig)
+                # Create grade distribution chart
+                grades = [r['grade']['points'] for r in results]
+                fig = px.histogram(
+                    x=grades,
+                    nbins=10,
+                    labels={'x': 'Points', 'y': 'Count'},
+                    title='Grade Distribution'
+                )
+                st.plotly_chart(fig)
 
     elif assignment_type == "Short Answer":
         st.subheader("Short Answer Grading")
@@ -373,60 +376,64 @@ def render_grading_page():
 
                         # Store in session state
                         st.session_state.grading_results = results
+                        # Also store for this specific assignment type
+                        st.session_state.short_answer_grading_results = results
 
                         # Show success message
                         st.success(f"Successfully graded {len(results)} short answer submissions!")
 
-                        # Display results
-                        if results:
-                            result_data = []
-                            for result in results:
-                                result_data.append({
-                                    'Student ID': result['student_id'],
-                                    'Student Name': result['student_name'],
-                                    'Points': result['grade']['points'],
-                                    'Percentage': f"{result['grade']['percentage']}%",
-                                    'Keywords': f"{len(result['grade']['matched_keywords'])}/{len(result['grade']['matched_keywords']) + len(result['grade']['missing_keywords'])}"
-                                })
+            # Display results - outside the form
+            if 'short_answer_grading_results' in st.session_state and st.session_state.short_answer_grading_results:
+                results = st.session_state.short_answer_grading_results
+                result_data = []
+                for result in results:
+                    result_data.append({
+                        'Student ID': result['student_id'],
+                        'Student Name': result['student_name'],
+                        'Points': result['grade']['points'],
+                        'Percentage': f"{result['grade']['percentage']}%",
+                        'Keywords': f"{len(result['grade']['matched_keywords'])}/{len(result['grade']['matched_keywords']) + len(result['grade']['missing_keywords'])}"
+                    })
 
-                            # Create DataFrame and display
-                            result_df = pd.DataFrame(result_data)
-                            st.dataframe(result_df)
+                # Create DataFrame and display
+                result_df = pd.DataFrame(result_data)
+                st.dataframe(result_df)
 
-                            # Detailed view for a selected student
-                            st.subheader("Detailed Grading")
-                            selected_student = st.selectbox(
-                                "Select student to view detailed feedback",
-                                options=[r['student_name'] for r in results]
-                            )
+                # Detailed view for a selected student
+                st.subheader("Detailed Grading")
+                selected_student = st.selectbox(
+                    "Select student to view detailed feedback",
+                    options=[r['student_name'] for r in results],
+                    key="short_answer_student_selector"
+                )
 
-                            # Show detailed feedback for selected student
-                            selected_result = next((r for r in results if r['student_name'] == selected_student), None)
-                            if selected_result:
-                                st.markdown(f"**Student:** {selected_result['student_name']}")
-                                st.markdown(
-                                    f"**Points:** {selected_result['grade']['points']}/{selected_result['grade']['max_points']}")
+                # Show detailed feedback for selected student
+                selected_result = next((r for r in results if r['student_name'] == selected_student), None)
+                if selected_result:
+                    st.markdown(f"**Student:** {selected_result['student_name']}")
+                    st.markdown(
+                        f"**Points:** {selected_result['grade']['points']}/{selected_result['grade']['max_points']}")
 
-                                # Keyword matching
-                                st.markdown("**Matched Keywords:**")
-                                if selected_result['grade']['matched_keywords']:
-                                    st.write(", ".join(selected_result['grade']['matched_keywords']))
-                                else:
-                                    st.write("None")
+                    # Keyword matching
+                    st.markdown("**Matched Keywords:**")
+                    if selected_result['grade']['matched_keywords']:
+                        st.write(", ".join(selected_result['grade']['matched_keywords']))
+                    else:
+                        st.write("None")
 
-                                st.markdown("**Missing Keywords:**")
-                                if selected_result['grade']['missing_keywords']:
-                                    st.write(", ".join(selected_result['grade']['missing_keywords']))
-                                else:
-                                    st.write("None")
+                    st.markdown("**Missing Keywords:**")
+                    if selected_result['grade']['missing_keywords']:
+                        st.write(", ".join(selected_result['grade']['missing_keywords']))
+                    else:
+                        st.write("None")
 
-                                # Similarity
-                                st.markdown(
-                                    f"**Overall Similarity:** {selected_result['grade']['similarity'] * 100:.2f}%")
+                    # Similarity
+                    st.markdown(
+                        f"**Overall Similarity:** {selected_result['grade']['similarity'] * 100:.2f}%")
 
-                                # Feedback
-                                st.markdown("**Feedback:**")
-                                st.write(selected_result['grade']['feedback'])
+                    # Feedback
+                    st.markdown("**Feedback:**")
+                    st.write(selected_result['grade']['feedback'])
 
     elif assignment_type == "Code":
         st.subheader("Code Grading")
@@ -438,6 +445,9 @@ def render_grading_page():
         if len(code_submissions) > 0:
             st.warning("Code grading requires test cases. Please define test cases for automatic grading.")
 
+            # ----------------------------------------------
+            # FORM SECTION - Only contains the grading form
+            # ----------------------------------------------
             # Code grading form
             with st.form("code_grading_form"):
                 st.markdown("#### Grading Criteria")
@@ -484,134 +494,136 @@ def render_grading_page():
                 # Submit button
                 submitted = st.form_submit_button("Start Code Grading")
 
-                if submitted and test_cases_json:
-                    with st.spinner("Grading code submissions..."):
-                        try:
-                            # Parse test cases
-                            import json
-                            test_cases = json.loads(test_cases_json)
+            # ----------------------------------------------
+            # PROCESSING SECTION - Outside the form
+            # ----------------------------------------------
+            # Process form submission (note this is outside the form context)
+            if submitted and test_cases_json:
+                with st.spinner("Grading code submissions..."):
+                    try:
+                        # Parse test cases
+                        import json
+                        test_cases = json.loads(test_cases_json)
 
-                            # Initialize grading manager
-                            grading_manager = GradingManager()
+                        # Initialize grading manager
+                        grading_manager = GradingManager()
 
-                            # Register code grader
-                            code_grader = CodeGrader(
-                                answer_key=reference_code,
-                                test_cases=test_cases,
-                                language=language,
-                                total_points=total_points
-                            )
-                            grading_manager.register_grader('code', code_grader)
+                        # Register code grader
+                        code_grader = CodeGrader(
+                            answer_key=reference_code,
+                            test_cases=test_cases,
+                            language=language,
+                            total_points=total_points
+                        )
+                        grading_manager.register_grader('code', code_grader)
 
-                            # Grade each submission
-                            results = []
-                            for submission in code_submissions:
-                                try:
-                                    # Get file content
-                                    file_path = submission['current_file']['path']
-                                    content = st.session_state.file_processor.get_file_content(file_path)
+                        # Grade each submission
+                        results = []
+                        for submission in code_submissions:
+                            try:
+                                # Get file content
+                                file_path = submission['current_file']['path']
+                                content = st.session_state.file_processor.get_file_content(file_path)
 
-                                    # Grade the submission
-                                    grade_result = grading_manager.grade_submission('code', content)
+                                # Grade the submission
+                                grade_result = grading_manager.grade_submission('code', content)
 
-                                    # Store the result
-                                    results.append({
-                                        'student_id': submission['student_id'],
-                                        'student_name': submission['student_name'],
-                                        'file_name': submission['current_file']['name'],
-                                        'grade': grade_result
-                                    })
-                                except Exception as e:
-                                    st.error(f"Error grading {submission['student_name']}'s submission: {e}")
+                                # Store the result
+                                results.append({
+                                    'student_id': submission['student_id'],
+                                    'student_name': submission['student_name'],
+                                    'file_name': submission['current_file']['name'],
+                                    'grade': grade_result
+                                })
+                            except Exception as e:
+                                st.error(f"Error grading {submission['student_name']}'s submission: {e}")
 
-                            # Store in session state
-                            st.session_state.grading_results = results
+                        # Store in session state
+                        st.session_state.grading_results = results
+                        # Also store for this specific assignment type
+                        st.session_state.code_grading_results = results
 
-                            # Show success message
-                            st.success(f"Successfully graded {len(results)} code submissions!")
+                        # Show success message
+                        st.success(f"Successfully graded {len(results)} code submissions!")
 
-                            # Display results
-                            if results:
-                                result_data = []
-                                for result in results:
-                                    result_data.append({
-                                        'Student ID': result['student_id'],
-                                        'Student Name': result['student_name'],
-                                        'Points': result['grade']['points'],
-                                        'Percentage': f"{result['grade']['percentage']}%",
-                                        'Passed Tests': f"{result['grade']['passed_tests']}/{result['grade']['total_tests']}"
-                                    })
+                    except json.JSONDecodeError:
+                        st.error("Invalid JSON format for test cases. Please check your input.")
 
-                                # Create DataFrame and display
-                                result_df = pd.DataFrame(result_data)
-                                st.dataframe(result_df)
+            # ----------------------------------------------
+            # RESULTS DISPLAY SECTION - Completely outside the form
+            # ----------------------------------------------
+            # Check if we have code grading results and display them
+            # This uses either the results from the current submission or from session state
+            if 'code_grading_results' in st.session_state and st.session_state.code_grading_results:
+                # Get results from session state
+                results = st.session_state.code_grading_results
 
-                                # Show test details for a student
-                                st.subheader("Test Details")
+                # Display results table
+                result_data = []
+                for result in results:
+                    result_data.append({
+                        'Student ID': result['student_id'],
+                        'Student Name': result['student_name'],
+                        'Points': result['grade']['points'],
+                        'Percentage': f"{result['grade']['percentage']}%",
+                        'Passed Tests': f"{result['grade']['passed_tests']}/{result['grade']['total_tests']}"
+                    })
 
-                                # Initialize session state for selected student if not exists
-                                if 'selected_student' not in st.session_state:
-                                    st.session_state.selected_student = results[0]['student_name'] if results else None
+                # Create DataFrame and display
+                result_df = pd.DataFrame(result_data)
+                st.dataframe(result_df)
 
-                                # Function to handle student selection change
-                                def on_student_change():
-                                    st.session_state.selected_student = st.session_state.student_selector
+                # Show test details for a student - completely outside any form
+                st.subheader("Test Details")
 
-                                # Create the student selector with the callback
-                                student_names = [r['student_name'] for r in results]
-                                student_selector_index = student_names.index(
-                                    st.session_state.selected_student) if st.session_state.selected_student in student_names else 0
+                # Simple selectbox for student selection
+                selected_student = st.selectbox(
+                    "Select student to view test results",
+                    options=[r['student_name'] for r in results],
+                    key="code_student_selector"  # Unique key to ensure proper state management
+                )
 
-                                st.selectbox(
-                                    "Select student to view test results",
-                                    options=student_names,
-                                    index=student_selector_index,
-                                    key="student_selector",
-                                    on_change=on_student_change
-                                )
+                # Show test results for selected student
+                selected_result = next(
+                    (r for r in results if r['student_name'] == selected_student),
+                    None)
 
-                                # Show test results for selected student
-                                selected_result = next(
-                                    (r for r in results if r['student_name'] == st.session_state.selected_student),
-                                    None)
-                                if selected_result:
-                                    st.markdown(f"**Student:** {selected_result['student_name']}")
-                                    st.markdown(
-                                        f"**Points:** {selected_result['grade']['points']}/{selected_result['grade']['max_points']}")
+                if selected_result:
+                    st.markdown(f"**Student:** {selected_result['student_name']}")
+                    st.markdown(
+                        f"**Points:** {selected_result['grade']['points']}/{selected_result['grade']['max_points']}")
 
-                                    # Test results
-                                    st.markdown("**Test Results:**")
-                                    for test in selected_result['grade']['test_results']:
-                                        if test['passed']:
-                                            st.success(f"✅ {test['name']} - Passed")
-                                        else:
-                                            st.error(f"❌ {test['name']} - Failed: {test['message']}")
+                    # Test results
+                    st.markdown("**Test Results:**")
+                    for test in selected_result['grade']['test_results']:
+                        if test['passed']:
+                            st.success(f"✅ {test['name']} - Passed")
+                        else:
+                            st.error(f"❌ {test['name']} - Failed: {test['message']}")
 
-                                # Calculate statistics
-                                avg_grade = sum(r['grade']['points'] for r in results) / len(results)
-                                max_grade = max(r['grade']['points'] for r in results)
-                                min_grade = min(r['grade']['points'] for r in results)
+                # Calculate statistics
+                avg_grade = sum(r['grade']['points'] for r in results) / len(results)
+                max_grade = max(r['grade']['points'] for r in results)
+                min_grade = min(r['grade']['points'] for r in results)
 
-                                # Display statistics
-                                col1, col2, col3 = st.columns(3)
-                                with col1:
-                                    st.metric("Average Grade", f"{avg_grade:.2f}")
-                                with col2:
-                                    st.metric("Highest Grade", f"{max_grade:.2f}")
-                                with col3:
-                                    st.metric("Lowest Grade", f"{min_grade:.2f}")
+                # Display statistics
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Average Grade", f"{avg_grade:.2f}")
+                with col2:
+                    st.metric("Highest Grade", f"{max_grade:.2f}")
+                with col3:
+                    st.metric("Lowest Grade", f"{min_grade:.2f}")
 
-                                # Create grade distribution chart
-                                grades = [r['grade']['points'] for r in results]
-                                fig = px.histogram(
-                                    x=grades,
-                                    nbins=10,
-                                    labels={'x': 'Points', 'y': 'Count'},
-                                    title='Grade Distribution'
-                                )
-                                st.plotly_chart(fig)
-                        except json.JSONDecodeError:
-                            st.error("Invalid JSON format for test cases. Please check your input.")
+                # Create grade distribution chart
+                grades = [r['grade']['points'] for r in results]
+                fig = px.histogram(
+                    x=grades,
+                    nbins=10,
+                    labels={'x': 'Points', 'y': 'Count'},
+                    title='Grade Distribution'
+                )
+                st.plotly_chart(fig)
 
     # Navigation
     st.markdown("---")
@@ -681,60 +693,61 @@ def render_plagiarism_page():
                         # Show success message
                         st.success(f"Successfully compared {len(text_submissions)} text submissions!")
 
-                        # Display results
-                        if report:
-                            st.markdown(f"#### Plagiarism Summary")
-                            st.markdown(f"Total Submissions: {report['total_submissions']}")
-                            st.markdown(f"Flagged Pairs: {report['flagged_pairs']}")
-                            st.markdown(f"Flagged Students: {report['flagged_students']}")
-                            st.markdown(f"Similarity Threshold: {report['threshold'] * 100}%")
+            # Display results - outside the form
+            if 'text' in st.session_state.plagiarism_results:
+                report = st.session_state.plagiarism_results['text']
+                st.markdown(f"#### Plagiarism Summary")
+                st.markdown(f"Total Submissions: {report['total_submissions']}")
+                st.markdown(f"Flagged Pairs: {report['flagged_pairs']}")
+                st.markdown(f"Flagged Students: {report['flagged_students']}")
+                st.markdown(f"Similarity Threshold: {report['threshold'] * 100}%")
 
-                            # Show flagged pairs
-                            if report['flagged_pairs'] > 0:
-                                st.markdown("#### Flagged Submissions")
+                # Show flagged pairs
+                if report['flagged_pairs'] > 0:
+                    st.markdown("#### Flagged Submissions")
 
-                                flagged_data = []
-                                for result in report['results']:
-                                    if result['flagged']:
-                                        flagged_data.append({
-                                            'Student 1': f"{result['student1_name']} ({result['student1_id']})",
-                                            'Student 2': f"{result['student2_name']} ({result['student2_id']})",
-                                            'Similarity': f"{result['similarity'] * 100:.2f}%",
-                                            'File 1': result['student1_file'],
-                                            'File 2': result['student2_file']
-                                        })
+                    flagged_data = []
+                    for result in report['results']:
+                        if result['flagged']:
+                            flagged_data.append({
+                                'Student 1': f"{result['student1_name']} ({result['student1_id']})",
+                                'Student 2': f"{result['student2_name']} ({result['student2_id']})",
+                                'Similarity': f"{result['similarity'] * 100:.2f}%",
+                                'File 1': result['student1_file'],
+                                'File 2': result['student2_file']
+                            })
 
-                                # Create DataFrame and display
-                                if flagged_data:
-                                    flagged_df = pd.DataFrame(flagged_data)
-                                    st.dataframe(flagged_df)
+                    # Create DataFrame and display
+                    if flagged_data:
+                        flagged_df = pd.DataFrame(flagged_data)
+                        st.dataframe(flagged_df)
 
-                                    # Create heatmap data
-                                    students = set()
-                                    for result in report['results']:
-                                        students.add(result['student1_name'])
-                                        students.add(result['student2_name'])
+                        # Create heatmap data
+                        students = set()
+                        for result in report['results']:
+                            students.add(result['student1_name'])
+                            students.add(result['student2_name'])
 
-                                    students = list(students)
-                                    heatmap_data = pd.DataFrame(0, index=students, columns=students)
+                        students = list(students)
+                        heatmap_data = pd.DataFrame(0, index=students, columns=students)
 
-                                    for result in report['results']:
-                                        s1 = result['student1_name']
-                                        s2 = result['student2_name']
-                                        heatmap_data.loc[s1, s2] = result['similarity'] * 100
-                                        heatmap_data.loc[s2, s1] = result['similarity'] * 100
+                        for result in report['results']:
+                            s1 = result['student1_name']
+                            s2 = result['student2_name']
+                            heatmap_data.loc[s1, s2] = result['similarity'] * 100
+                            heatmap_data.loc[s2, s1] = result['similarity'] * 100
 
-                                    # Create heatmap
-                                    fig = px.imshow(
-                                        heatmap_data,
-                                        labels=dict(x="Student", y="Student", color="Similarity %"),
-                                        x=heatmap_data.columns,
-                                        y=heatmap_data.index,
-                                        color_continuous_scale='Blues'
-                                    )
-                                    st.plotly_chart(fig)
-                            else:
-                                st.success("No plagiarism detected above the threshold!")
+                        # Create heatmap
+                        fig = px.imshow(
+                            heatmap_data,
+                            labels=dict(x="Student", y="Student", color="Similarity %"),
+                            x=heatmap_data.columns,
+                            y=heatmap_data.index,
+                            color_continuous_scale='Blues'
+                        )
+                        st.plotly_chart(fig)
+                else:
+                    st.success("No plagiarism detected above the threshold!")
 
     with tab2:
         st.subheader("Code Plagiarism Detection")
@@ -789,60 +802,61 @@ def render_plagiarism_page():
                         # Show success message
                         st.success(f"Successfully compared {len(code_submissions)} code submissions!")
 
-                        # Display results
-                        if report:
-                            st.markdown(f"#### Plagiarism Summary")
-                            st.markdown(f"Total Submissions: {report['total_submissions']}")
-                            st.markdown(f"Flagged Pairs: {report['flagged_pairs']}")
-                            st.markdown(f"Flagged Students: {report['flagged_students']}")
-                            st.markdown(f"Similarity Threshold: {report['threshold'] * 100}%")
+            # Display results - outside the form
+            if 'code' in st.session_state.plagiarism_results:
+                report = st.session_state.plagiarism_results['code']
+                st.markdown(f"#### Plagiarism Summary")
+                st.markdown(f"Total Submissions: {report['total_submissions']}")
+                st.markdown(f"Flagged Pairs: {report['flagged_pairs']}")
+                st.markdown(f"Flagged Students: {report['flagged_students']}")
+                st.markdown(f"Similarity Threshold: {report['threshold'] * 100}%")
 
-                            # Show flagged pairs
-                            if report['flagged_pairs'] > 0:
-                                st.markdown("#### Flagged Submissions")
+                # Show flagged pairs
+                if report['flagged_pairs'] > 0:
+                    st.markdown("#### Flagged Submissions")
 
-                                flagged_data = []
-                                for result in report['results']:
-                                    if result['flagged']:
-                                        flagged_data.append({
-                                            'Student 1': f"{result['student1_name']} ({result['student1_id']})",
-                                            'Student 2': f"{result['student2_name']} ({result['student2_id']})",
-                                            'Similarity': f"{result['similarity'] * 100:.2f}%",
-                                            'Token Sim': f"{result['token_similarity'] * 100:.2f}%",
-                                            'AST Sim': f"{result['ast_similarity'] * 100:.2f}%"
-                                        })
+                    flagged_data = []
+                    for result in report['results']:
+                        if result['flagged']:
+                            flagged_data.append({
+                                'Student 1': f"{result['student1_name']} ({result['student1_id']})",
+                                'Student 2': f"{result['student2_name']} ({result['student2_id']})",
+                                'Similarity': f"{result['similarity'] * 100:.2f}%",
+                                'Token Sim': f"{result['token_similarity'] * 100:.2f}%",
+                                'AST Sim': f"{result['ast_similarity'] * 100:.2f}%"
+                            })
 
-                                # Create DataFrame and display
-                                if flagged_data:
-                                    flagged_df = pd.DataFrame(flagged_data)
-                                    st.dataframe(flagged_df)
+                    # Create DataFrame and display
+                    if flagged_data:
+                        flagged_df = pd.DataFrame(flagged_data)
+                        st.dataframe(flagged_df)
 
-                                    # Create heatmap data
-                                    students = set()
-                                    for result in report['results']:
-                                        students.add(result['student1_name'])
-                                        students.add(result['student2_name'])
+                        # Create heatmap data
+                        students = set()
+                        for result in report['results']:
+                            students.add(result['student1_name'])
+                            students.add(result['student2_name'])
 
-                                    students = list(students)
-                                    heatmap_data = pd.DataFrame(0, index=students, columns=students)
+                        students = list(students)
+                        heatmap_data = pd.DataFrame(0, index=students, columns=students)
 
-                                    for result in report['results']:
-                                        s1 = result['student1_name']
-                                        s2 = result['student2_name']
-                                        heatmap_data.loc[s1, s2] = result['similarity'] * 100
-                                        heatmap_data.loc[s2, s1] = result['similarity'] * 100
+                        for result in report['results']:
+                            s1 = result['student1_name']
+                            s2 = result['student2_name']
+                            heatmap_data.loc[s1, s2] = result['similarity'] * 100
+                            heatmap_data.loc[s2, s1] = result['similarity'] * 100
 
-                                    # Create heatmap
-                                    fig = px.imshow(
-                                        heatmap_data,
-                                        labels=dict(x="Student", y="Student", color="Similarity %"),
-                                        x=heatmap_data.columns,
-                                        y=heatmap_data.index,
-                                        color_continuous_scale='Reds'
-                                    )
-                                    st.plotly_chart(fig)
-                            else:
-                                st.success("No plagiarism detected above the threshold!")
+                        # Create heatmap
+                        fig = px.imshow(
+                            heatmap_data,
+                            labels=dict(x="Student", y="Student", color="Similarity %"),
+                            x=heatmap_data.columns,
+                            y=heatmap_data.index,
+                            color_continuous_scale='Reds'
+                        )
+                        st.plotly_chart(fig)
+                else:
+                    st.success("No plagiarism detected above the threshold!")
 
     # Navigation
     st.markdown("---")
@@ -932,7 +946,7 @@ def render_report_page():
                 # Show success message
                 st.success(f"Successfully generated {len(reports)} reports!")
 
-    # Display reports if available
+    # Display reports if available - outside the form
     if st.session_state.report_paths:
         st.header("2. Download Reports")
 

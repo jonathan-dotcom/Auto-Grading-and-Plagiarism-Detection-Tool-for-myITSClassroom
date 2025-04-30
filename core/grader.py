@@ -2,8 +2,6 @@ import os
 import tempfile
 import subprocess
 from typing import Dict, List, Any, Union, Tuple
-import re
-import json
 
 import docker
 import numpy as np
@@ -178,63 +176,14 @@ class CodeGrader(BaseGrader):
         self.test_cases = test_cases
         self.language = language
 
-        # Initialize Docker client with Linux-specific connection methods
+        # Initialize Docker client with multiple connection attempts
         self.client = None
         connection_errors = []
 
         try:
+            # Try Windows named pipe connection
             import platform
-            system = platform.system()
-            print(f"Detected platform: {system}")
-
-            if system == 'Linux':
-                # For Linux servers, try these connection methods
-                try:
-                    # Clear any problematic environment variables
-                    import os
-                    if 'DOCKER_HOST' in os.environ:
-                        print(f"Found DOCKER_HOST={os.environ['DOCKER_HOST']}, clearing it")
-                        saved_docker_host = os.environ['DOCKER_HOST']
-                        del os.environ['DOCKER_HOST']
-                    else:
-                        saved_docker_host = None
-
-                    try:
-                        # Try direct socket connection first (most reliable on Linux)
-                        import docker
-                        print("Trying direct socket connection...")
-                        self.client = docker.DockerClient(base_url='unix:///var/run/docker.sock')
-                        print("Connected to Docker using Unix socket")
-                    except Exception as e:
-                        connection_errors.append(f"Unix socket error: {str(e)}")
-
-                        # If that fails, try default connection
-                        if not self.client:
-                            try:
-                                import docker
-                                print("Trying default connection...")
-                                self.client = docker.from_env()
-                                print("Connected to Docker using environment")
-                            except Exception as e:
-                                connection_errors.append(f"Default connection error: {str(e)}")
-
-                        # If all else fails, try TCP connection
-                        if not self.client:
-                            try:
-                                import docker
-                                print("Trying TCP connection...")
-                                self.client = docker.DockerClient(base_url='tcp://localhost:2375')
-                                print("Connected to Docker using TCP")
-                            except Exception as e:
-                                connection_errors.append(f"TCP connection error: {str(e)}")
-
-                    # Restore environment if we changed it
-                    if saved_docker_host is not None:
-                        os.environ['DOCKER_HOST'] = saved_docker_host
-
-                except Exception as e:
-                    connection_errors.append(f"Linux connection error: {str(e)}")
-            elif system == 'Windows':
+            if platform.system() == 'Windows':
                 try:
                     import docker
                     self.client = docker.DockerClient(base_url='npipe:////./pipe/docker_engine')
@@ -250,7 +199,17 @@ class CodeGrader(BaseGrader):
                         print("Connected to Docker using TCP")
                     except Exception as e:
                         connection_errors.append(f"TCP error: {str(e)}")
-            else:  # Mac or other
+
+                # If both failed, try Docker socket
+                if not self.client:
+                    try:
+                        import docker
+                        self.client = docker.DockerClient(base_url='unix:///var/run/docker.sock')
+                        print("Connected to Docker using socket")
+                    except Exception as e:
+                        connection_errors.append(f"Socket error: {str(e)}")
+            else:
+                # Unix systems typically work with from_env() or socket
                 try:
                     import docker
                     self.client = docker.from_env()
@@ -441,38 +400,35 @@ if __name__ == '__main__':
         with open(test_path, 'w') as f:
             f.write(test_file_content)
 
-        # Check if we have a real Docker client or a mock one
-        if not isinstance(self.client, MockDockerClient):
-            try:
-                # Run tests in Docker container
-                container = self.client.containers.run(
-                    'python:3.9-slim',
-                    ["/bin/sh", "-c", "cd /app && python test_submission.py"],
-                    volumes={temp_dir: {'bind': '/app', 'mode': 'ro'}},
-                    remove=True,
-                    stdout=True,
-                    stderr=True
-                )
-                output = container.decode('utf-8')
+        # Run tests in Docker container
+        try:
+            # Use shell to execute the command sequence
+            container = self.client.containers.run(
+                'python:3.9-slim',
+                ["/bin/sh", "-c", "cd /app && python test_submission.py"],
+                volumes={temp_dir: {'bind': '/app', 'mode': 'ro'}},
+                remove=True,
+                stdout=True,
+                stderr=True
+            )
+            output = container.decode('utf-8')
 
-                # Parse JSON output
-                json_match = re.search(r'\[(.*?)\]', output, re.DOTALL)
-                if json_match:
-                    json_str = json_match.group(0)
-                    return json.loads(json_str)
-                else:
-                    # If no JSON found, return error
-                    return [{'name': 'execution', 'passed': False, 'message': output}]
-            except Exception as e:
-                print(f"Docker execution failed: {e}")
-                print("Falling back to local Python execution")
+            # Parse JSON output
+            import json
+            import re
 
-                # Use local Python execution as fallback
-                return local_python_test_runner(submission, self.test_cases, temp_dir)
-        else:
-            # If we're using a mock client, use local Python instead for real testing
-            print("Using local Python execution instead of mock Docker")
-            return local_python_test_runner(submission, self.test_cases, temp_dir)
+            # Find JSON in output
+            json_match = re.search(r'\[(.*?)\]', output, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+                return json.loads(json_str)
+            else:
+                # If no JSON found, return error
+                return [{'name': 'execution', 'passed': False, 'message': output}]
+
+        except Exception as e:
+            # Handle Docker or execution errors
+            return [{'name': 'execution', 'passed': False, 'message': str(e)}]
 
 
 class GradingManager:
@@ -505,153 +461,3 @@ class GradingManager:
             raise ValueError(f"No grader registered for {assignment_type}")
 
         return self.graders[assignment_type].grade(submission)
-
-
-# Local Python test runner for fallback when Docker isn't available
-def local_python_test_runner(submission: str, test_cases: List[Dict[str, Any]], temp_dir: str = None) -> List[
-    Dict[str, Any]]:
-    """
-    Run Python tests locally without Docker for Linux environments where Docker isn't working.
-    This can be used as a fallback when Docker connection fails.
-
-    Args:
-        submission: The Python code to test
-        test_cases: List of test cases to run
-        temp_dir: Optional temporary directory to use (will create one if not provided)
-
-    Returns:
-        List of test results in the same format as Docker-based grading
-    """
-    # Create temporary directory if none provided
-    created_temp_dir = False
-    if not temp_dir:
-        temp_dir = tempfile.mkdtemp()
-        created_temp_dir = True
-
-    try:
-        # Create submission file
-        submission_path = os.path.join(temp_dir, 'submission.py')
-        with open(submission_path, 'w') as f:
-            f.write(submission)
-
-        # Create test file
-        test_file_content = """
-import unittest
-import submission
-
-class TestSubmission(unittest.TestCase):
-"""
-        for i, test_case in enumerate(test_cases):
-            test_function = f"""
-    def test_{i + 1}(self):
-        """
-            if 'input' in test_case and 'expected_output' in test_case:
-                # For function output testing
-                test_function += f"""
-        result = submission.{test_case.get('function_name', 'main')}({test_case['input']})
-        self.assertEqual(result, {test_case['expected_output']})
-        """
-            elif 'assertion' in test_case:
-                # For custom assertions
-                test_function += f"""
-        {test_case['assertion']}
-        """
-
-            test_file_content += test_function
-
-        # Fixed test runner code
-        test_file_content += """
-if __name__ == '__main__':
-    import json
-    import sys
-    from unittest import TextTestRunner, TestResult
-
-    class JSONTestResult(TestResult):
-        def __init__(self):
-            super().__init__()
-            self.results = []
-
-        def addSuccess(self, test):
-            super().addSuccess(test)
-            self.results.append({
-                'name': test._testMethodName,
-                'passed': True,
-                'message': ''
-            })
-
-        def addFailure(self, test, err):
-            super().addFailure(test, err)
-            self.results.append({
-                'name': test._testMethodName,
-                'passed': False,
-                'message': str(err[1])
-            })
-
-        def addError(self, test, err):
-            super().addError(test, err)
-            self.results.append({
-                'name': test._testMethodName,
-                'passed': False,
-                'message': str(err[1])
-            })
-
-    # Create test suite
-    suite = unittest.makeSuite(TestSubmission)
-
-    # Create custom result and run tests
-    result = JSONTestResult()
-    runner = TextTestRunner(verbosity=2)
-    runner._makeResult = lambda: result  # Override the _makeResult method
-    runner.run(suite)
-
-    # Print the JSON results
-    print(json.dumps(result.results))
-"""
-
-        test_path = os.path.join(temp_dir, 'test_submission.py')
-        with open(test_path, 'w') as f:
-            f.write(test_file_content)
-
-        # Run tests using local Python interpreter
-        print(f"Running tests locally in {temp_dir}")
-
-        # Change to the temp directory
-        current_dir = os.getcwd()
-        os.chdir(temp_dir)
-
-        try:
-            # Run the tests (with timeout for safety)
-            result = subprocess.run(['python3', 'test_submission.py'],
-                                    capture_output=True,
-                                    text=True,
-                                    timeout=30)
-
-            output = result.stdout
-
-            # Change back to original directory
-            os.chdir(current_dir)
-
-            # Parse JSON output
-            json_match = re.search(r'\[(.*?)\]', output, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(0)
-                return json.loads(json_str)
-            else:
-                # If no JSON found, return error
-                return [{'name': 'execution', 'passed': False, 'message': output}]
-
-        except subprocess.TimeoutExpired:
-            # Change back to original directory
-            os.chdir(current_dir)
-            return [{'name': 'execution', 'passed': False, 'message': 'Test execution timed out after 30 seconds'}]
-
-        except Exception as e:
-            # Change back to original directory
-            os.chdir(current_dir)
-            return [{'name': 'execution', 'passed': False, 'message': str(e)}]
-
-    finally:
-        # Clean up if we created the temp dir
-        if created_temp_dir:
-            import shutil
-            shutil.rmtree(temp_dir)

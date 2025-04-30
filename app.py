@@ -548,14 +548,32 @@ def render_grading_page():
 
                                 # Show test details for a student
                                 st.subheader("Test Details")
-                                selected_student = st.selectbox(
+
+                                # Initialize session state for selected student if not exists
+                                if 'selected_student' not in st.session_state:
+                                    st.session_state.selected_student = results[0]['student_name'] if results else None
+
+                                # Function to handle student selection change
+                                def on_student_change():
+                                    st.session_state.selected_student = st.session_state.student_selector
+
+                                # Create the student selector with the callback
+                                student_names = [r['student_name'] for r in results]
+                                student_selector_index = student_names.index(
+                                    st.session_state.selected_student) if st.session_state.selected_student in student_names else 0
+
+                                st.selectbox(
                                     "Select student to view test results",
-                                    options=[r['student_name'] for r in results]
+                                    options=student_names,
+                                    index=student_selector_index,
+                                    key="student_selector",
+                                    on_change=on_student_change
                                 )
 
                                 # Show test results for selected student
-                                selected_result = next((r for r in results if r['student_name'] == selected_student),
-                                                       None)
+                                selected_result = next(
+                                    (r for r in results if r['student_name'] == st.session_state.selected_student),
+                                    None)
                                 if selected_result:
                                     st.markdown(f"**Student:** {selected_result['student_name']}")
                                     st.markdown(

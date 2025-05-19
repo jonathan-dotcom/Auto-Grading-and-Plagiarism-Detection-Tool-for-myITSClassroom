@@ -2,3 +2,4 @@
 exportedfilesfrommoodle/
 reports/
 .venv
+__pycache__

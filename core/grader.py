@@ -174,7 +174,7 @@ class CodeGrader(BaseGrader):
         """Initialize the code grader."""
         super().__init__(answer_key, total_points)
         self.test_cases = test_cases
-        self.language = language
+        self.language = language.lower()  # Ensure lowercase for consistency
 
         # Initialize Docker client with multiple connection attempts
         self.client = None
@@ -253,12 +253,50 @@ FAILED (failures=1)
                     print(f"Mock Docker: Running {image} with command {command}")
                     return MockDockerContainer()
 
+            class MockDockerImages:
+                def get(self, image_name):
+                    print(f"Mock Docker: Checking for image {image_name}")
+                    # Simulates the image exists
+                    return {"Id": "mock_image_id"}
+
+                def pull(self, image_name):
+                    print(f"Mock Docker: Pulling image {image_name}")
+                    return None
+
             class MockDockerClient:
                 def __init__(self):
                     self.containers = MockDockerContainers()
+                    self.images = MockDockerImages()
 
             print("Using mock Docker client for testing")
             self.client = MockDockerClient()
+
+    def _ensure_image_exists(self, image_name: str) -> bool:
+        """
+        Check if a Docker image exists and pull it if not.
+
+        Args:
+            image_name: The name of the Docker image to check
+
+        Returns:
+            True if the image exists or was successfully pulled, False otherwise
+        """
+        try:
+            # Try to get the image to see if it exists locally
+            try:
+                self.client.images.get(image_name)
+                # Image exists locally
+                print(f"Docker image {image_name} exists locally")
+                return True
+            except Exception:
+                # Image doesn't exist locally, try to pull it
+                print(f"Docker image {image_name} not found locally. Pulling from Docker Hub...")
+                self.client.images.pull(image_name)
+                print(f"Successfully pulled {image_name}")
+                return True
+        except Exception as e:
+            print(f"Failed to ensure Docker image {image_name}: {e}")
+            return False
 
     def grade(self, submission: str) -> Dict[str, Any]:
         """Grade a code submission using Docker execution and test cases."""
@@ -269,6 +307,10 @@ FAILED (failures=1)
             # Set up files based on language
             if self.language == 'python':
                 test_results = self._grade_python(submission, temp_dir)
+            elif self.language == 'c':
+                test_results = self._grade_c(submission, temp_dir)
+            elif self.language == 'cpp' or self.language == 'c++':
+                test_results = self._grade_cpp(submission, temp_dir)
             else:
                 # For other languages, implement specific grading logic
                 raise NotImplementedError(f"Grading for {self.language} not implemented yet")
@@ -317,6 +359,11 @@ FAILED (failures=1)
         Returns:
             List of test results
         """
+        # Ensure Python image exists
+        if not self._ensure_image_exists('python:3.9-slim'):
+            return [{'name': 'docker_error', 'passed': False,
+                     'message': "Docker image 'python:3.9-slim' could not be pulled. Check your Docker configuration and internet connection."}]
+
         # Create submission file
         submission_path = os.path.join(temp_dir, 'submission.py')
         with open(submission_path, 'w') as f:
@@ -429,6 +476,384 @@ if __name__ == '__main__':
         except Exception as e:
             # Handle Docker or execution errors
             return [{'name': 'execution', 'passed': False, 'message': str(e)}]
+
+    def _grade_c(self, submission: str, temp_dir: str) -> List[Dict[str, Any]]:
+        """Grade a C submission.
+
+        Args:
+            submission: The C code
+            temp_dir: Temporary directory for files
+
+        Returns:
+            List of test results
+        """
+        # Ensure the Docker image is available
+        if not self._ensure_image_exists('gcc:latest'):
+            return [{'name': 'docker_error', 'passed': False,
+                     'message': "Docker image 'gcc:latest' could not be pulled. Check your Docker configuration and internet connection."}]
+
+        # Create submission file
+        submission_path = os.path.join(temp_dir, 'submission.c')
+        with open(submission_path, 'w') as f:
+            f.write(submission)
+
+        # Create header file with function declarations
+        header_path = os.path.join(temp_dir, 'submission.h')
+        with open(header_path, 'w') as f:
+            f.write("#ifndef SUBMISSION_H\n#define SUBMISSION_H\n\n")
+
+            # Extract function declarations from the submission
+            # This is a simple approach; may need refinement for complex C code
+            for line in submission.split('\n'):
+                # Look for lines that might be function declarations
+                if (
+                        'int ' in line or 'void ' in line or 'char ' in line or 'float ' in line or 'double ' in line) and '(' in line and ');' in line:
+                    # It's likely a function declaration
+                    f.write(f"{line}\n")
+
+            f.write("\n#endif // SUBMISSION_H\n")
+
+        # Create test file
+        test_file_path = os.path.join(temp_dir, 'test_submission.c')
+
+        test_file_content = """
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <assert.h>
+#include "submission.h"
+
+// For storing test results
+typedef struct {
+    char name[100];
+    int passed;
+    char message[200];
+} TestResult;
+
+TestResult results[50]; // Array to store test results
+int result_count = 0;
+
+// Helper function to add a test result
+void add_result(const char* name, int passed, const char* message) {
+    strcpy(results[result_count].name, name);
+    results[result_count].passed = passed;
+    if (message) {
+        strcpy(results[result_count].message, message);
+    } else {
+        results[result_count].message[0] = '\\0';
+    }
+    result_count++;
+}
+
+"""
+
+        # Add test functions
+        for i, test_case in enumerate(self.test_cases):
+            test_name = f"test_{i + 1}"
+            test_function = f"""
+void {test_name}() {{
+    printf("Running {test_name}...\\n");
+"""
+
+            if 'function_name' in test_case and 'input' in test_case and 'expected_output' in test_case:
+                # Parse input parameters
+                params = test_case['input'].split(',')
+
+                # Determine output type (assuming int for simplicity, can be extended)
+                output_type = "int"  # Default type
+
+                # Create test logic
+                test_function += f"""
+    // Call function and check result
+    {output_type} result = {test_case['function_name']}({test_case['input']});
+    {output_type} expected = {test_case['expected_output']};
+
+    if (result == expected) {{
+        add_result("{test_name}", 1, NULL);
+    }} else {{
+        char msg[200];
+        sprintf(msg, "%d != %d", result, expected);
+        add_result("{test_name}", 0, msg);
+    }}
+"""
+            elif 'assertion' in test_case:
+                # Direct assertion test
+                test_function += f"""
+    // Custom assertion
+    if ({test_case['assertion']}) {{
+        add_result("{test_name}", 1, NULL);
+    }} else {{
+        add_result("{test_name}", 0, "Assertion failed: {test_case['assertion'].replace('"', '\\"')}");
+    }}
+"""
+
+            test_function += "}\n"
+            test_file_content += test_function
+
+        # Add main function to run all tests and output results as JSON
+        test_file_content += """
+int main() {
+    // Run all tests
+"""
+
+        for i in range(len(self.test_cases)):
+            test_file_content += f"    test_{i + 1}();\n"
+
+        test_file_content += """
+    // Output results as JSON
+    printf("[");
+    for (int i = 0; i < result_count; i++) {
+        printf(
+            "{\\"name\\": \\"test_%d\\", \\"passed\\": %s, \\"message\\": \\"%s\\"}%s",
+            i + 1,
+            results[i].passed ? "true" : "false",
+            results[i].message,
+            (i < result_count - 1) ? ", " : ""
+        );
+    }
+    printf("]\\n");
+
+    return 0;
+}
+"""
+
+        with open(test_file_path, 'w') as f:
+            f.write(test_file_content)
+
+        # Create build script
+        build_script_path = os.path.join(temp_dir, 'build.sh')
+        with open(build_script_path, 'w') as f:
+            f.write("""#!/bin/sh
+gcc -Wall -o test_program submission.c test_submission.c
+if [ $? -ne 0 ]; then
+    # Compilation failed
+    echo "[{\\\"name\\\": \\\"compilation\\\", \\\"passed\\\": false, \\\"message\\\": \\\"Compilation failed\\\"}]"
+    exit 1
+fi
+./test_program
+""")
+
+        # Make build script executable
+        os.chmod(build_script_path, 0o755)
+
+        # Run tests in Docker container
+        try:
+            container = self.client.containers.run(
+                'gcc:latest',  # Use GCC image for C compilation
+                ["/bin/sh", "-c", "cd /app && sh build.sh"],
+                volumes={temp_dir: {'bind': '/app', 'mode': 'ro'}},
+                remove=True,
+                stdout=True,
+                stderr=True
+            )
+            output = container.decode('utf-8')
+
+            # Parse JSON output
+            import json
+            import re
+
+            # Find JSON in output
+            json_match = re.search(r'\[(.*?)\]', output, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+                return json.loads(json_str)
+            else:
+                # If no JSON found, return error
+                return [{'name': 'execution', 'passed': False, 'message': output}]
+
+        except Exception as e:
+            # For debugging - print more detailed error information
+            import traceback
+            print(f"Error running Docker container for C code: {e}")
+            print(traceback.format_exc())
+
+            # Handle Docker or execution errors
+            return [{'name': 'execution', 'passed': False, 'message': f"Docker error: {str(e)}"}]
+
+    def _grade_cpp(self, submission: str, temp_dir: str) -> List[Dict[str, Any]]:
+        """Grade a C++ submission.
+
+        Args:
+            submission: The C++ code
+            temp_dir: Temporary directory for files
+
+        Returns:
+            List of test results
+        """
+        # Ensure the Docker image is available
+        if not self._ensure_image_exists('gcc:latest'):
+            return [{'name': 'docker_error', 'passed': False,
+                     'message': "Docker image 'gcc:latest' could not be pulled. Check your Docker configuration and internet connection."}]
+
+        # Create submission file
+        submission_path = os.path.join(temp_dir, 'submission.cpp')
+        with open(submission_path, 'w') as f:
+            f.write(submission)
+
+        # Create header file with function declarations
+        header_path = os.path.join(temp_dir, 'submission.h')
+        with open(header_path, 'w') as f:
+            f.write("#ifndef SUBMISSION_H\n#define SUBMISSION_H\n\n")
+
+            # Extract function declarations from the submission
+            # This is a simple approach; may need refinement for complex C++ code
+            for line in submission.split('\n'):
+                # Look for lines that might be function declarations
+                if ('int ' in line or 'void ' in line or 'char ' in line or 'float ' in line or
+                    'double ' in line or 'bool ' in line or 'string ' in line) and '(' in line and ');' in line:
+                    # It's likely a function declaration
+                    f.write(f"{line}\n")
+
+            f.write("\n#endif // SUBMISSION_H\n")
+
+        # Create test file
+        test_file_path = os.path.join(temp_dir, 'test_submission.cpp')
+
+        test_file_content = """
+#include <iostream>
+#include <cassert>
+#include <string>
+#include <vector>
+#include <sstream>
+#include "submission.h"
+
+using namespace std;
+
+// Structure to hold test results
+struct TestResult {
+    string name;
+    bool passed;
+    string message;
+};
+
+vector<TestResult> results;
+
+// Add a test result
+void add_result(const string& name, bool passed, const string& message = "") {
+    results.push_back({name, passed, message});
+}
+
+"""
+
+        # Add test functions
+        for i, test_case in enumerate(self.test_cases):
+            test_name = f"test_{i + 1}"
+            test_function = f"""
+void {test_name}() {{
+    cout << "Running {test_name}..." << endl;
+"""
+
+            if 'function_name' in test_case and 'input' in test_case and 'expected_output' in test_case:
+                # Parse input parameters
+                params = test_case['input'].split(',')
+
+                # Create test logic
+                test_function += f"""
+    // Call function and check result
+    auto result = {test_case['function_name']}({test_case['input']});
+    auto expected = {test_case['expected_output']};
+
+    if (result == expected) {{
+        add_result("{test_name}", true);
+    }} else {{
+        ostringstream msg;
+        msg << result << " != " << expected;
+        add_result("{test_name}", false, msg.str());
+    }}
+"""
+            elif 'assertion' in test_case:
+                # Direct assertion test
+                test_function += f"""
+    // Custom assertion
+    if ({test_case['assertion']}) {{
+        add_result("{test_name}", true);
+    }} else {{
+        add_result("{test_name}", false, "Assertion failed: {test_case['assertion'].replace('"', '\\"')}");
+    }}
+"""
+
+            test_function += "}\n"
+            test_file_content += test_function
+
+        # Add main function to run all tests and output results as JSON
+        test_file_content += """
+int main() {
+    // Run all tests
+"""
+
+        for i in range(len(self.test_cases)):
+            test_file_content += f"    test_{i + 1}();\n"
+
+        test_file_content += """
+    // Output results as JSON
+    cout << "[";
+    for (size_t i = 0; i < results.size(); ++i) {
+        cout << "{\\"name\\": \\"" << results[i].name
+             << "\\", \\"passed\\": " << (results[i].passed ? "true" : "false")
+             << ", \\"message\\": \\"" << results[i].message << "\\"}";
+
+        if (i < results.size() - 1) {
+            cout << ", ";
+        }
+    }
+    cout << "]" << endl;
+
+    return 0;
+}
+"""
+
+        with open(test_file_path, 'w') as f:
+            f.write(test_file_content)
+
+        # Create build script
+        build_script_path = os.path.join(temp_dir, 'build.sh')
+        with open(build_script_path, 'w') as f:
+            f.write("""#!/bin/sh
+g++ -Wall -std=c++17 -o test_program submission.cpp test_submission.cpp
+if [ $? -ne 0 ]; then
+    # Compilation failed
+    echo "[{\\\"name\\\": \\\"compilation\\\", \\\"passed\\\": false, \\\"message\\\": \\\"Compilation failed\\\"}]"
+    exit 1
+fi
+./test_program
+""")
+
+        # Make build script executable
+        os.chmod(build_script_path, 0o755)
+
+        # Run tests in Docker container
+        try:
+            container = self.client.containers.run(
+                'gcc:latest',  # Use GCC image for C++ compilation
+                ["/bin/sh", "-c", "cd /app && sh build.sh"],
+                volumes={temp_dir: {'bind': '/app', 'mode': 'ro'}},
+                remove=True,
+                stdout=True,
+                stderr=True
+            )
+            output = container.decode('utf-8')
+
+            # Parse JSON output
+            import json
+            import re
+
+            # Find JSON in output
+            json_match = re.search(r'\[(.*?)\]', output, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+                return json.loads(json_str)
+            else:
+                # If no JSON found, return error
+                return [{'name': 'execution', 'passed': False, 'message': output}]
+
+        except Exception as e:
+            # For debugging - print more detailed error information
+            import traceback
+            print(f"Error running Docker container for C++ code: {e}")
+            print(traceback.format_exc())
+
+            # Handle Docker or execution errors
+            return [{'name': 'execution', 'passed': False, 'message': f"Docker error: {str(e)}"}]
 
 
 class GradingManager:

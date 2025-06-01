@@ -1,12 +1,18 @@
 import os
 import ast
 import tokenize
-import re
 import io
+import re
+import hashlib
+import time
+import logging
 from typing import List, Dict, Any, Tuple, Set
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+
+# Set up logging
+logger = logging.getLogger('plagiarism_detection')
 
 
 class PlagiarismDetector:
@@ -61,62 +67,90 @@ class PlagiarismDetector:
 
 
 class TextPlagiarismDetector(PlagiarismDetector):
-    """Detect plagiarism in text submissions using NLP techniques."""
+    """Detect plagiarism in text submissions using advanced NLP techniques."""
+
+    def __init__(self, threshold: float = 0.8):
+        super().__init__(threshold)
+        self.fingerprint_size = 10  # Size of rolling hash fingerprints
 
     def detect(self, submissions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Detect plagiarism between text submissions using TF-IDF and cosine similarity.
+        """Detect plagiarism between text submissions using multiple techniques."""
+        start_time = time.time()
+        logger.info(f"Starting text plagiarism detection with {len(submissions)} submissions")
+        logger.debug(f"Threshold: {self.threshold}")
 
-        Args:
-            submissions: List of submission dictionaries, each with 'student_id',
-                         'student_name', 'file_name', and 'content'.
-
-        Returns:
-            List of plagiarism detection results (compared pairs).
-        """
         texts = []
         metadata = []
 
-        for submission in submissions:
+        for i, submission in enumerate(submissions):
+            logger.debug(f"Processing submission {i + 1}: {submission.get('student_name', 'Unknown')}")
             content = submission.get('content')
             if content is None:
-                print(
-                    f"Warning: Content missing for submission from student {submission.get('student_id', 'Unknown')}, file {submission.get('file_name', 'Unknown')}")
+                logger.warning(f"Content missing for submission from student {submission.get('student_id', 'Unknown')}")
                 continue
 
-            texts.append(content)
+            # Clean and extract text content
+            cleaned_content = self._clean_text_content(content)
+            logger.debug(f"Original content length: {len(content)}, Cleaned length: {len(cleaned_content)}")
+
+            if not cleaned_content or len(cleaned_content.strip()) < 50:
+                logger.warning(
+                    f"Insufficient content for student {submission.get('student_name', 'Unknown')} - only {len(cleaned_content)} chars")
+                continue
+
+            texts.append(cleaned_content)
             metadata.append({
                 'student_id': submission['student_id'],
                 'student_name': submission['student_name'],
                 'file_name': submission['file_name']
             })
+            logger.debug(f"Added {submission['student_name']} to analysis (content length: {len(cleaned_content)})")
+
+        logger.info(f"Processing {len(texts)} text submissions for plagiarism detection after filtering")
 
         if len(texts) < 2:
+            logger.warning("Not enough submissions for comparison")
             return []
 
-        vectorizer = TfidfVectorizer(
-            lowercase=True,
-            stop_words='english',
-            ngram_range=(1, 3),
-            max_df=0.85,
-            min_df=2 if len(texts) > 10 else 1
-        )
-
         try:
-            if not any(texts):
-                print("Warning: All text submissions are empty or None.")
-                return []
-
-            tfidf_matrix = vectorizer.fit_transform(texts)
-
-            if tfidf_matrix.shape[0] == 0 or tfidf_matrix.shape[1] == 0:
-                print("Warning: TF-IDF matrix is empty. Could not vectorize texts.")
-                return []
-
-            similarity_matrix = cosine_similarity(tfidf_matrix)
             results = []
+            total_comparisons = (len(texts) * (len(texts) - 1)) // 2
+            logger.info(f"Will perform {total_comparisons} pairwise comparisons")
+
+            comparison_count = 0
             for i in range(len(texts)):
                 for j in range(i + 1, len(texts)):
-                    similarity = similarity_matrix[i][j]
+                    comparison_count += 1
+                    student1 = metadata[i]['student_name']
+                    student2 = metadata[j]['student_name']
+
+                    logger.debug(f"Comparison {comparison_count}/{total_comparisons}: {student1} vs {student2}")
+
+                    # Multiple similarity measures
+                    tfidf_start = time.time()
+                    tfidf_sim = self._calculate_tfidf_similarity(texts[i], texts[j])
+                    tfidf_time = time.time() - tfidf_start
+
+                    fingerprint_start = time.time()
+                    fingerprint_sim = self._calculate_fingerprint_similarity(texts[i], texts[j])
+                    fingerprint_time = time.time() - fingerprint_start
+
+                    ngram_start = time.time()
+                    ngram_sim = self._calculate_ngram_similarity(texts[i], texts[j])
+                    ngram_time = time.time() - ngram_start
+
+                    # Weighted combination of similarities
+                    combined_similarity = (0.4 * tfidf_sim + 0.3 * fingerprint_sim + 0.3 * ngram_sim)
+
+                    logger.debug(f"  TF-IDF: {tfidf_sim:.3f} ({tfidf_time:.2f}s)")
+                    logger.debug(f"  Fingerprint: {fingerprint_sim:.3f} ({fingerprint_time:.2f}s)")
+                    logger.debug(f"  N-gram: {ngram_sim:.3f} ({ngram_time:.2f}s)")
+                    logger.debug(f"  Combined: {combined_similarity:.3f}")
+
+                    flagged = combined_similarity >= self.threshold
+                    if flagged:
+                        logger.info(f"FLAGGED: {student1} vs {student2} - similarity: {combined_similarity:.3f}")
+
                     results.append({
                         'student1_id': metadata[i]['student_id'],
                         'student1_name': metadata[i]['student_name'],
@@ -124,45 +158,188 @@ class TextPlagiarismDetector(PlagiarismDetector):
                         'student2_id': metadata[j]['student_id'],
                         'student2_name': metadata[j]['student_name'],
                         'student2_file': metadata[j]['file_name'],
-                        'similarity': float(similarity),
-                        'flagged': similarity >= self.threshold
+                        'tfidf_similarity': float(tfidf_sim),
+                        'fingerprint_similarity': float(fingerprint_sim),
+                        'ngram_similarity': float(ngram_sim),
+                        'similarity': float(combined_similarity),
+                        'flagged': flagged
                     })
+
             results.sort(key=lambda x: x['similarity'], reverse=True)
+            total_time = time.time() - start_time
+            flagged_count = sum(1 for r in results if r['flagged'])
+
+            logger.info(f"Text plagiarism detection completed in {total_time:.2f}s")
+            logger.info(f"Generated {len(results)} comparison results, {flagged_count} flagged as potential plagiarism")
+
             return results
-        except ValueError as ve:
-            print(f"ValueError in text plagiarism detection (TF-IDF): {ve}. This might happen if vocabulary is empty.")
-            return []
+
         except Exception as e:
-            print(f"Error in text plagiarism detection: {e}")
+            logger.error(f"Error in text plagiarism detection: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return []
+
+    def _clean_text_content(self, content: str) -> str:
+        """Clean and extract meaningful text content."""
+        logger.debug(f"Cleaning text content of length {len(content)}")
+
+        if not content:
+            logger.debug("Empty content provided")
+            return ""
+
+        # If content looks like HTML, extract text
+        if '<' in content and '>' in content:
+            logger.debug("Content appears to be HTML, extracting text")
+            try:
+                import re
+                original_length = len(content)
+
+                # Remove script and style elements
+                content = re.sub(r'<script[^>]*>.*?</script>', '', content, flags=re.DOTALL | re.IGNORECASE)
+                content = re.sub(r'<style[^>]*>.*?</style>', '', content, flags=re.DOTALL | re.IGNORECASE)
+
+                # Remove HTML tags
+                content = re.sub(r'<[^>]+>', ' ', content)
+
+                # Clean up HTML entities
+                content = content.replace('&nbsp;', ' ')
+                content = content.replace('&lt;', '<')
+                content = content.replace('&gt;', '>')
+                content = content.replace('&amp;', '&')
+
+                logger.debug(f"HTML cleaning: {original_length} -> {len(content)} characters")
+
+            except Exception as e:
+                logger.error(f"Error cleaning HTML content: {e}")
+
+        # Clean up whitespace
+        import re
+        content = re.sub(r'\s+', ' ', content)
+        content = content.strip()
+
+        logger.debug(f"Final cleaned content length: {len(content)}")
+        if len(content) > 0:
+            logger.debug(f"Content preview: {content[:100]}...")
+
+        return content
+
+    def _calculate_tfidf_similarity(self, text1: str, text2: str) -> float:
+        """Calculate TF-IDF based similarity."""
+        logger.debug("Calculating TF-IDF similarity")
+
+        if not text1.strip() or not text2.strip():
+            logger.debug("One or both texts are empty")
+            return 0.0
+
+        try:
+            vectorizer = TfidfVectorizer(
+                lowercase=True,
+                stop_words='english',
+                ngram_range=(1, 2),  # Use 1-2 grams instead of 1-3
+                max_df=0.85,
+                min_df=1,
+                max_features=1000  # Limit features to prevent memory issues
+            )
+
+            logger.debug("Creating TF-IDF matrix")
+            tfidf_matrix = vectorizer.fit_transform([text1, text2])
+            logger.debug(f"TF-IDF matrix shape: {tfidf_matrix.shape}")
+
+            if tfidf_matrix.shape[1] == 0:
+                logger.warning("TF-IDF matrix has no features")
+                return 0.0
+
+            similarity = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0]
+            logger.debug(f"TF-IDF similarity: {similarity}")
+            return similarity
+
+        except Exception as e:
+            logger.error(f"TF-IDF similarity error: {e}")
+            return 0.0
+
+    def _calculate_fingerprint_similarity(self, text1: str, text2: str) -> float:
+        """Calculate similarity using rolling hash fingerprints (Rabin-Karp style)."""
+
+        def get_fingerprints(text: str, window_size: int = 5) -> Set[str]:  # Smaller window
+            fingerprints = set()
+            words = text.lower().split()
+
+            if len(words) < window_size:
+                return {' '.join(words)}  # Return the entire text as one fingerprint
+
+            for i in range(len(words) - window_size + 1):
+                window = ' '.join(words[i:i + window_size])
+                fingerprints.add(window)
+
+            return fingerprints
+
+        if not text1.strip() or not text2.strip():
+            return 0.0
+
+        fp1 = get_fingerprints(text1)
+        fp2 = get_fingerprints(text2)
+
+        if not fp1 or not fp2:
+            return 0.0
+
+        intersection = len(fp1.intersection(fp2))
+        union = len(fp1.union(fp2))
+
+        return intersection / union if union > 0 else 0.0
+
+    def _calculate_ngram_similarity(self, text1: str, text2: str, n: int = 3) -> float:
+        """Calculate character n-gram similarity."""
+
+        def get_ngrams(text: str, n: int) -> Set[str]:
+            text = text.lower().replace(' ', '')
+            if len(text) < n:
+                return {text}
+            return set(text[i:i + n] for i in range(len(text) - n + 1))
+
+        if not text1.strip() or not text2.strip():
+            return 0.0
+
+        ngrams1 = get_ngrams(text1, n)
+        ngrams2 = get_ngrams(text2, n)
+
+        if not ngrams1 or not ngrams2:
+            return 0.0
+
+        intersection = len(ngrams1.intersection(ngrams2))
+        union = len(ngrams1.union(ngrams2))
+
+        return intersection / union if union > 0 else 0.0
 
 
 class CodePlagiarismDetector(PlagiarismDetector):
-    """Detect plagiarism in code submissions using AST and token analysis."""
+    """Detect plagiarism in code submissions using advanced AST and structural analysis."""
 
     def __init__(self, threshold: float = 0.8, language: str = 'python'):
         super().__init__(threshold)
-        self.language = language.lower()  # Ensure lowercase for consistency
+        self.language = language.lower()
 
     def detect(self, submissions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Detect plagiarism in code submissions."""
         if self.language == 'python':
             return self._detect_python_plagiarism(submissions)
-        elif self.language == 'c':
-            return self._detect_c_plagiarism(submissions)
-        elif self.language == 'cpp' or self.language == 'c++':
-            return self._detect_cpp_plagiarism(submissions)
+        elif self.language in ['c', 'cpp']:
+            return self._detect_c_cpp_plagiarism(submissions)
+        elif self.language in ['javascript', 'js']:
+            return self._detect_javascript_plagiarism(submissions)
+        elif self.language == 'java':
+            return self._detect_java_plagiarism(submissions)
         else:
-            print(f"Warning: Plagiarism detection for {self.language} not implemented yet. Returning empty results.")
+            print(f"Warning: Plagiarism detection for {self.language} not implemented yet.")
             return []
 
     def _detect_python_plagiarism(self, submissions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Enhanced Python plagiarism detection."""
         processed_submissions = []
 
         for submission in submissions:
             code_content = submission.get('content')
             if code_content is None:
-                print(
-                    f"Warning: Code content missing for submission from student {submission.get('student_id', 'Unknown')}, file {submission.get('file_name', 'Unknown')}")
                 continue
 
             try:
@@ -173,11 +350,12 @@ class CodePlagiarismDetector(PlagiarismDetector):
                         'student_name': submission['student_name'],
                         'file_name': submission['file_name'],
                         'tokens': processed['tokens'],
-                        'ast_nodes': processed['ast_nodes']
+                        'ast_nodes': processed['ast_nodes'],
+                        'structure_hash': processed['structure_hash'],
+                        'normalized_code': processed['normalized_code']
                     })
             except Exception as e:
-                print(
-                    f"Error processing Python code for student {submission.get('student_id', 'Unknown')}, file {submission.get('file_name', 'Unknown')}: {e}")
+                print(f"Error processing Python code for student {submission.get('student_id', 'Unknown')}: {e}")
 
         if len(processed_submissions) < 2:
             return []
@@ -188,12 +366,14 @@ class CodePlagiarismDetector(PlagiarismDetector):
                 sub1 = processed_submissions[i]
                 sub2 = processed_submissions[j]
 
+                # Multiple similarity measures
                 token_sim = self._calculate_token_similarity(sub1['tokens'], sub2['tokens'])
                 ast_sim = self._calculate_ast_similarity(sub1['ast_nodes'], sub2['ast_nodes'])
+                structure_sim = 1.0 if sub1['structure_hash'] == sub2['structure_hash'] else 0.0
+                normalized_sim = self._calculate_normalized_similarity(sub1['normalized_code'], sub2['normalized_code'])
 
-                token_weight = 0.6
-                ast_weight = 0.4
-                combined_sim = token_weight * token_sim + ast_weight * ast_sim
+                # Weighted combination
+                combined_sim = (0.3 * token_sim + 0.3 * ast_sim + 0.2 * structure_sim + 0.2 * normalized_sim)
 
                 results.append({
                     'student1_id': sub1['student_id'],
@@ -204,495 +384,370 @@ class CodePlagiarismDetector(PlagiarismDetector):
                     'student2_file': sub2['file_name'],
                     'token_similarity': float(token_sim),
                     'ast_similarity': float(ast_sim),
+                    'structure_similarity': float(structure_sim),
+                    'normalized_similarity': float(normalized_sim),
                     'similarity': float(combined_sim),
                     'flagged': combined_sim >= self.threshold
                 })
+
         results.sort(key=lambda x: x['similarity'], reverse=True)
         return results
 
-    def _detect_c_plagiarism(self, submissions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Detect plagiarism between C code submissions.
-
-        Args:
-            submissions: List of submission dictionaries.
-
-        Returns:
-            List of plagiarism detection results.
-        """
-        processed_submissions = []
-
-        for submission in submissions:
-            code_content = submission.get('content')
-            if code_content is None:
-                print(
-                    f"Warning: Code content missing for submission from student {submission.get('student_id', 'Unknown')}, file {submission.get('file_name', 'Unknown')}")
-                continue
-
-            try:
-                processed = self._process_c_code(code_content)
-                if processed:
-                    processed_submissions.append({
-                        'student_id': submission['student_id'],
-                        'student_name': submission['student_name'],
-                        'file_name': submission['file_name'],
-                        'tokens': processed['tokens'],
-                        'structures': processed['structures']
-                    })
-            except Exception as e:
-                print(
-                    f"Error processing C code for student {submission.get('student_id', 'Unknown')}, file {submission.get('file_name', 'Unknown')}: {e}")
-
-        if len(processed_submissions) < 2:
-            return []
-
-        results = []
-        for i in range(len(processed_submissions)):
-            for j in range(i + 1, len(processed_submissions)):
-                sub1 = processed_submissions[i]
-                sub2 = processed_submissions[j]
-
-                token_sim = self._calculate_token_similarity(sub1['tokens'], sub2['tokens'])
-                struct_sim = self._calculate_structure_similarity(sub1['structures'], sub2['structures'])
-
-                token_weight = 0.6
-                struct_weight = 0.4
-                combined_sim = token_weight * token_sim + struct_weight * struct_sim
-
-                results.append({
-                    'student1_id': sub1['student_id'],
-                    'student1_name': sub1['student_name'],
-                    'student1_file': sub1['file_name'],
-                    'student2_id': sub2['student_id'],
-                    'student2_name': sub2['student_name'],
-                    'student2_file': sub2['file_name'],
-                    'token_similarity': float(token_sim),
-                    'struct_similarity': float(struct_sim),
-                    'similarity': float(combined_sim),
-                    'flagged': combined_sim >= self.threshold
-                })
-        results.sort(key=lambda x: x['similarity'], reverse=True)
-        return results
-
-    def _detect_cpp_plagiarism(self, submissions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Detect plagiarism between C++ code submissions.
-
-        Args:
-            submissions: List of submission dictionaries.
-
-        Returns:
-            List of plagiarism detection results.
-        """
-        processed_submissions = []
-
-        for submission in submissions:
-            code_content = submission.get('content')
-            if code_content is None:
-                print(
-                    f"Warning: Code content missing for submission from student {submission.get('student_id', 'Unknown')}, file {submission.get('file_name', 'Unknown')}")
-                continue
-
-            try:
-                processed = self._process_cpp_code(code_content)
-                if processed:
-                    processed_submissions.append({
-                        'student_id': submission['student_id'],
-                        'student_name': submission['student_name'],
-                        'file_name': submission['file_name'],
-                        'tokens': processed['tokens'],
-                        'structures': processed['structures']
-                    })
-            except Exception as e:
-                print(
-                    f"Error processing C++ code for student {submission.get('student_id', 'Unknown')}, file {submission.get('file_name', 'Unknown')}: {e}")
-
-        if len(processed_submissions) < 2:
-            return []
-
-        results = []
-        for i in range(len(processed_submissions)):
-            for j in range(i + 1, len(processed_submissions)):
-                sub1 = processed_submissions[i]
-                sub2 = processed_submissions[j]
-
-                token_sim = self._calculate_token_similarity(sub1['tokens'], sub2['tokens'])
-                struct_sim = self._calculate_structure_similarity(sub1['structures'], sub2['structures'])
-
-                token_weight = 0.6
-                struct_weight = 0.4
-                combined_sim = token_weight * token_sim + struct_weight * struct_sim
-
-                results.append({
-                    'student1_id': sub1['student_id'],
-                    'student1_name': sub1['student_name'],
-                    'student1_file': sub1['file_name'],
-                    'student2_id': sub2['student_id'],
-                    'student2_name': sub2['student_name'],
-                    'student2_file': sub2['file_name'],
-                    'token_similarity': float(token_sim),
-                    'struct_similarity': float(struct_sim),
-                    'similarity': float(combined_sim),
-                    'flagged': combined_sim >= self.threshold
-                })
-        results.sort(key=lambda x: x['similarity'], reverse=True)
-        return results
-
-    def _process_python_code(self, code: str) -> Dict[str, Any] | None:
-        """Process Python code to extract tokens and AST nodes."""
+    def _process_python_code(self, code: str) -> Dict[str, Any]:
+        """Enhanced Python code processing."""
         try:
+            # Tokenization
             tokens = []
-            token_generator = tokenize.generate_tokens(io.StringIO(code).readline)
-            for token in token_generator:
-                if token.type not in (
-                        tokenize.COMMENT, tokenize.NEWLINE, tokenize.NL,
-                        tokenize.INDENT, tokenize.DEDENT, tokenize.ENCODING, tokenize.ENDMARKER
-                ):
-                    tokens.append((tokenize.tok_name[token.type], token.string))
+            try:
+                token_generator = tokenize.generate_tokens(io.StringIO(code).readline)
+                for token in token_generator:
+                    if token.type not in (tokenize.COMMENT, tokenize.NEWLINE, tokenize.NL,
+                                          tokenize.INDENT, tokenize.DEDENT, tokenize.ENCODING, tokenize.ENDMARKER):
+                        tokens.append((tokenize.tok_name[token.type], token.string))
+            except tokenize.TokenError:
+                pass
 
-            if not code.strip():
-                return {'tokens': [], 'ast_nodes': []}
-
-            tree = ast.parse(code)
+            # AST processing
             ast_nodes = []
-            for node in ast.walk(tree):
-                node_info = {'type': type(node).__name__}
-                if isinstance(node, ast.Name):
-                    node_info['id'] = node.id
-                elif isinstance(node, ast.Constant):
-                    node_info['value'] = str(node.value)
-                elif isinstance(node, (ast.Num, ast.Str, ast.Bytes, ast.NameConstant)):
-                    if isinstance(node, ast.Num):
-                        node_info['value'] = str(node.n)
-                    elif isinstance(node, ast.Str):
-                        node_info['value'] = node.s
-                    elif isinstance(node, ast.Bytes):
-                        node_info['value'] = str(node.s)
-                    elif isinstance(node, ast.NameConstant):
-                        node_info['value'] = str(node.value)
-                elif isinstance(node, ast.Attribute):
-                    node_info['attr'] = node.attr
-                elif isinstance(node, ast.FunctionDef):
-                    node_info['name'] = node.name
-                    node_info['args_count'] = len(node.args.args)
-                elif isinstance(node, ast.ClassDef):
-                    node_info['name'] = node.name
-                    node_info['bases_count'] = len(node.bases)
+            structure_elements = []
 
-                ast_nodes.append(node_info)
-            return {'tokens': tokens, 'ast_nodes': ast_nodes}
-        except SyntaxError:
-            print(f"Syntax error in Python code, cannot parse AST or tokens.")
-            return None
-        except tokenize.TokenError as e:
-            print(f"Tokenization error in Python code: {e}")
-            return None
+            if code.strip():
+                tree = ast.parse(code)
+                for node in ast.walk(tree):
+                    node_info = {'type': type(node).__name__}
+
+                    # Enhanced node processing
+                    if isinstance(node, ast.FunctionDef):
+                        node_info['name'] = node.name
+                        node_info['args_count'] = len(node.args.args)
+                        structure_elements.append(f"func_{len(node.args.args)}")
+                    elif isinstance(node, ast.ClassDef):
+                        node_info['name'] = node.name
+                        structure_elements.append("class")
+                    elif isinstance(node, (ast.For, ast.While)):
+                        structure_elements.append("loop")
+                    elif isinstance(node, ast.If):
+                        structure_elements.append("conditional")
+
+                    ast_nodes.append(node_info)
+
+            # Create structure hash
+            structure_hash = hashlib.md5('_'.join(sorted(structure_elements)).encode()).hexdigest()
+
+            # Create normalized code (remove variable names, comments, etc.)
+            normalized_code = self._normalize_python_code(code)
+
+            return {
+                'tokens': tokens,
+                'ast_nodes': ast_nodes,
+                'structure_hash': structure_hash,
+                'normalized_code': normalized_code
+            }
         except Exception as e:
-            print(f"Unexpected error processing Python code: {e}")
+            print(f"Error processing Python code: {e}")
             return None
 
-    def _process_c_code(self, code: str) -> Dict[str, Any]:
-        """Process C code to extract tokens and structure information.
+    def _normalize_python_code(self, code: str) -> str:
+        """Normalize Python code by removing variable names and other identifiers."""
+        try:
+            # Simple normalization - replace identifiers with placeholders
+            normalized = re.sub(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', 'VAR', code)
+            normalized = re.sub(r'\d+', 'NUM', normalized)
+            normalized = re.sub(r'["\'].*?["\']', 'STR', normalized)
+            normalized = re.sub(r'\s+', ' ', normalized)
+            return normalized.strip()
+        except:
+            return code
 
-        Args:
-            code: C code as string.
+    def _detect_c_cpp_plagiarism(self, submissions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Detect plagiarism in C/C++ code using structural analysis."""
+        processed_submissions = []
 
-        Returns:
-            Dictionary with tokens and structures.
-        """
-        # Remove comments
-        code = self._remove_c_comments(code)
+        for submission in submissions:
+            code_content = submission.get('content')
+            if code_content is None:
+                continue
 
-        # Extract tokens
-        tokens = self._tokenize_c_code(code)
+            try:
+                processed = self._process_c_cpp_code(code_content)
+                if processed:
+                    processed_submissions.append({
+                        'student_id': submission['student_id'],
+                        'student_name': submission['student_name'],
+                        'file_name': submission['file_name'],
+                        'structure_hash': processed['structure_hash'],
+                        'tokens': processed['tokens'],
+                        'functions': processed['functions']
+                    })
+            except Exception as e:
+                print(f"Error processing C/C++ code: {e}")
 
-        # Extract structures (functions, loops, conditionals)
-        structures = self._extract_c_structures(code)
+        if len(processed_submissions) < 2:
+            return []
 
-        return {'tokens': tokens, 'structures': structures}
+        results = []
+        for i in range(len(processed_submissions)):
+            for j in range(i + 1, len(processed_submissions)):
+                sub1 = processed_submissions[i]
+                sub2 = processed_submissions[j]
 
-    def _process_cpp_code(self, code: str) -> Dict[str, Any]:
-        """Process C++ code to extract tokens and structure information.
+                structure_sim = 1.0 if sub1['structure_hash'] == sub2['structure_hash'] else 0.0
+                token_sim = self._calculate_sequence_similarity(sub1['tokens'], sub2['tokens'])
+                function_sim = self._calculate_function_similarity(sub1['functions'], sub2['functions'])
 
-        Args:
-            code: C++ code as string.
+                combined_sim = (0.4 * structure_sim + 0.3 * token_sim + 0.3 * function_sim)
 
-        Returns:
-            Dictionary with tokens and structures.
-        """
-        # For C++, we can reuse most of the C processing with some extensions
-        # Remove comments
-        code = self._remove_c_comments(code)
-
-        # Extract tokens with C++ specific ones
-        tokens = self._tokenize_cpp_code(code)
-
-        # Extract structures (classes, functions, loops, conditionals)
-        structures = self._extract_cpp_structures(code)
-
-        return {'tokens': tokens, 'structures': structures}
-
-    def _remove_c_comments(self, code: str) -> str:
-        """Remove C-style comments from code.
-
-        Args:
-            code: Original code with comments.
-
-        Returns:
-            Code with comments removed.
-        """
-        # Remove multi-line comments (/* ... */)
-        code = re.sub(r'/\*.*?\*/', ' ', code, flags=re.DOTALL)
-
-        # Remove single-line comments (// ...)
-        code = re.sub(r'//.*?$', ' ', code, flags=re.MULTILINE)
-
-        return code
-
-    def _tokenize_c_code(self, code: str) -> List[Tuple[str, str]]:
-        """Tokenize C code into meaningful tokens.
-
-        Args:
-            code: C code as string.
-
-        Returns:
-            List of token types and values.
-        """
-        # Define token patterns
-        token_patterns = [
-            ('KEYWORD',
-             r'\b(auto|break|case|char|const|continue|default|do|double|else|enum|extern|float|for|goto|if|int|long|register|return|short|signed|sizeof|static|struct|switch|typedef|union|unsigned|void|volatile|while)\b'),
-            ('IDENTIFIER', r'[a-zA-Z_][a-zA-Z0-9_]*'),
-            ('NUMBER', r'\b\d+(\.\d+)?(e[+-]?\d+)?\b'),
-            ('STRING', r'"[^"\\]*(\\.[^"\\]*)*"'),
-            ('CHAR', r"'[^'\\]*(\\.[^'\\]*)*'"),
-            ('OPERATOR', r'[+\-*/=%&|^~!<>?:]+'),
-            ('PUNCTUATION', r'[(){}\[\],;.]'),
-            ('WHITESPACE', r'\s+')
-        ]
-
-        # Combine patterns
-        combined_pattern = '|'.join(f'(?P<{name}>{pattern})' for name, pattern in token_patterns)
-
-        # Tokenize
-        tokens = []
-        for match in re.finditer(combined_pattern, code):
-            token_type = match.lastgroup
-            token_value = match.group()
-
-            # Skip whitespace
-            if token_type != 'WHITESPACE':
-                tokens.append((token_type, token_value))
-
-        return tokens
-
-    def _tokenize_cpp_code(self, code: str) -> List[Tuple[str, str]]:
-        """Tokenize C++ code into meaningful tokens.
-
-        Args:
-            code: C++ code as string.
-
-        Returns:
-            List of token types and values.
-        """
-        # Define token patterns with C++ specific keywords added
-        token_patterns = [
-            ('KEYWORD',
-             r'\b(auto|break|case|char|const|continue|default|do|double|else|enum|extern|float|for|goto|if|int|long|register|return|short|signed|sizeof|static|struct|switch|typedef|union|unsigned|void|volatile|while|class|namespace|template|try|catch|throw|new|delete|this|private|protected|public|friend|virtual|inline|bool|true|false|operator|using|explicit|export|mutable|typename)\b'),
-            ('IDENTIFIER', r'[a-zA-Z_][a-zA-Z0-9_]*'),
-            ('NUMBER', r'\b\d+(\.\d+)?(e[+-]?\d+)?\b'),
-            ('STRING', r'"[^"\\]*(\\.[^"\\]*)*"'),
-            ('CHAR', r"'[^'\\]*(\\.[^'\\]*)*'"),
-            ('OPERATOR', r'[+\-*/=%&|^~!<>?:]+|::|\->|<<|>>|&&|\|\||\+\+|\-\-'),
-            ('PUNCTUATION', r'[(){}\[\],;.]'),
-            ('WHITESPACE', r'\s+')
-        ]
-
-        # Combine patterns
-        combined_pattern = '|'.join(f'(?P<{name}>{pattern})' for name, pattern in token_patterns)
-
-        # Tokenize
-        tokens = []
-        for match in re.finditer(combined_pattern, code):
-            token_type = match.lastgroup
-            token_value = match.group()
-
-            # Skip whitespace
-            if token_type != 'WHITESPACE':
-                tokens.append((token_type, token_value))
-
-        return tokens
-
-    def _extract_c_structures(self, code: str) -> List[Dict[str, Any]]:
-        """Extract structural elements from C code.
-
-        Args:
-            code: C code as string.
-
-        Returns:
-            List of structural elements.
-        """
-        structures = []
-
-        # Extract functions
-        function_pattern = r'\b(\w+)\s+(\w+)\s*\((.*?)\)\s*\{([^}]*)\}'
-        for match in re.finditer(function_pattern, code, re.DOTALL):
-            return_type, name, params, body = match.groups()
-
-            # Count parameters
-            param_count = len(params.split(',')) if params.strip() else 0
-
-            # Analyze function complexity (count loops, conditionals)
-            loops = len(re.findall(r'\b(for|while|do)\b', body))
-            conditionals = len(re.findall(r'\b(if|else|switch|case)\b', body))
-
-            structures.append({
-                'type': 'function',
-                'name': name,
-                'return_type': return_type,
-                'param_count': param_count,
-                'body_length': len(body),
-                'loops': loops,
-                'conditionals': conditionals
-            })
-
-        # Extract loops (for, while, do-while)
-        loop_patterns = [
-            (r'for\s*\((.*?);(.*?);(.*?)\)\s*\{([^}]*)\}', 'for'),
-            (r'while\s*\((.*?)\)\s*\{([^}]*)\}', 'while'),
-            (r'do\s*\{([^}]*)\}\s*while\s*\((.*?)\);', 'do-while')
-        ]
-
-        for pattern, loop_type in loop_patterns:
-            for match in re.finditer(pattern, code, re.DOTALL):
-                structures.append({
-                    'type': 'loop',
-                    'loop_type': loop_type,
-                    'body_length': len(match.group())
+                results.append({
+                    'student1_id': sub1['student_id'],
+                    'student1_name': sub1['student_name'],
+                    'student1_file': sub1['file_name'],
+                    'student2_id': sub2['student_id'],
+                    'student2_name': sub2['student_name'],
+                    'student2_file': sub2['file_name'],
+                    'structure_similarity': float(structure_sim),
+                    'token_similarity': float(token_sim),
+                    'function_similarity': float(function_sim),
+                    'similarity': float(combined_sim),
+                    'flagged': combined_sim >= self.threshold
                 })
 
-        # Extract conditionals (if, if-else, switch)
-        if_pattern = r'if\s*\((.*?)\)\s*\{([^}]*)\}'
-        for match in re.finditer(if_pattern, code, re.DOTALL):
-            condition, body = match.groups()
-            structures.append({
-                'type': 'conditional',
-                'condition_type': 'if',
-                'body_length': len(body)
-            })
+        results.sort(key=lambda x: x['similarity'], reverse=True)
+        return results
 
-        if_else_pattern = r'if\s*\((.*?)\)\s*\{([^}]*)\}\s*else\s*\{([^}]*)\}'
-        for match in re.finditer(if_else_pattern, code, re.DOTALL):
-            condition, if_body, else_body = match.groups()
-            structures.append({
-                'type': 'conditional',
-                'condition_type': 'if-else',
-                'if_body_length': len(if_body),
-                'else_body_length': len(else_body)
-            })
+    def _process_c_cpp_code(self, code: str) -> Dict[str, Any]:
+        """Process C/C++ code for plagiarism detection."""
+        # Extract functions
+        function_pattern = r'(?:int|void|float|double|char|long|short)\s+(\w+)\s*\([^)]*\)\s*\{'
+        functions = re.findall(function_pattern, code)
 
-        switch_pattern = r'switch\s*\((.*?)\)\s*\{([^}]*)\}'
-        for match in re.finditer(switch_pattern, code, re.DOTALL):
-            expression, body = match.groups()
-            # Count case statements
-            cases = len(re.findall(r'\bcase\b', body))
-            structures.append({
-                'type': 'conditional',
-                'condition_type': 'switch',
-                'cases': cases,
-                'body_length': len(body)
-            })
+        # Extract control structures
+        structures = []
+        structures.extend(['if'] * len(re.findall(r'\bif\s*\(', code)))
+        structures.extend(['for'] * len(re.findall(r'\bfor\s*\(', code)))
+        structures.extend(['while'] * len(re.findall(r'\bwhile\s*\(', code)))
+        structures.extend(['switch'] * len(re.findall(r'\bswitch\s*\(', code)))
 
-        return structures
+        # Create structure hash
+        structure_hash = hashlib.md5('_'.join(sorted(structures + functions)).encode()).hexdigest()
 
-    def _extract_cpp_structures(self, code: str) -> List[Dict[str, Any]]:
-        """Extract structural elements from C++ code.
+        # Simple tokenization
+        tokens = re.findall(r'\w+|[{}();,]', code)
 
-        Args:
-            code: C++ code as string.
+        return {
+            'structure_hash': structure_hash,
+            'tokens': tokens,
+            'functions': functions
+        }
 
-        Returns:
-            List of structural elements.
-        """
-        # Start with C structures
-        structures = self._extract_c_structures(code)
+    def _detect_javascript_plagiarism(self, submissions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Detect plagiarism in JavaScript code."""
+        processed_submissions = []
 
-        # Extract C++ specific structures
+        for submission in submissions:
+            code_content = submission.get('content')
+            if code_content is None:
+                continue
 
-        # Classes
-        class_pattern = r'class\s+(\w+)(?:\s*:\s*(?:public|protected|private)\s+(\w+))?\s*\{([^}]*)\}'
-        for match in re.finditer(class_pattern, code, re.DOTALL):
-            name, parent, body = match.groups()
+            try:
+                processed = self._process_javascript_code(code_content)
+                if processed:
+                    processed_submissions.append({
+                        'student_id': submission['student_id'],
+                        'student_name': submission['student_name'],
+                        'file_name': submission['file_name'],
+                        'structure_hash': processed['structure_hash'],
+                        'tokens': processed['tokens'],
+                        'functions': processed['functions']
+                    })
+            except Exception as e:
+                print(f"Error processing JavaScript code: {e}")
 
-            # Count methods and fields
-            methods = len(re.findall(r'\b\w+\s+\w+\s*\([^)]*\)\s*(?:const)?\s*(?:=\s*0)?\s*[;{]', body))
-            fields = len(re.findall(r'\b\w+\s+\w+\s*;', body))
+        return self._compare_generic_code(processed_submissions)
 
-            structures.append({
-                'type': 'class',
-                'name': name,
-                'parent': parent if parent else 'None',
-                'methods': methods,
-                'fields': fields,
-                'body_length': len(body)
-            })
+    def _process_javascript_code(self, code: str) -> Dict[str, Any]:
+        """Process JavaScript code for plagiarism detection."""
+        # Extract functions
+        function_patterns = [
+            r'function\s+(\w+)\s*\(',
+            r'(\w+)\s*:\s*function\s*\(',
+            r'(\w+)\s*=>\s*'
+        ]
 
-        # Namespaces
-        namespace_pattern = r'namespace\s+(\w+)\s*\{([^}]*)\}'
-        for match in re.finditer(namespace_pattern, code, re.DOTALL):
-            name, body = match.groups()
-            structures.append({
-                'type': 'namespace',
-                'name': name,
-                'body_length': len(body)
-            })
+        functions = []
+        for pattern in function_patterns:
+            functions.extend(re.findall(pattern, code))
 
-        # Templates
-        template_pattern = r'template\s*<([^>]*)>\s*(?:class|struct)\s+(\w+)(?:\s*:\s*(?:public|protected|private)\s+(\w+))?\s*\{([^}]*)\}'
-        for match in re.finditer(template_pattern, code, re.DOTALL):
-            params, name, parent, body = match.groups()
+        # Extract control structures
+        structures = []
+        structures.extend(['if'] * len(re.findall(r'\bif\s*\(', code)))
+        structures.extend(['for'] * len(re.findall(r'\bfor\s*\(', code)))
+        structures.extend(['while'] * len(re.findall(r'\bwhile\s*\(', code)))
+        structures.extend(['switch'] * len(re.findall(r'\bswitch\s*\(', code)))
 
-            # Count template parameters
-            param_count = len(params.split(',')) if params.strip() else 0
+        structure_hash = hashlib.md5('_'.join(sorted(structures + functions)).encode()).hexdigest()
+        tokens = re.findall(r'\w+|[{}();,]', code)
 
-            structures.append({
-                'type': 'template_class',
-                'name': name,
-                'parent': parent if parent else 'None',
-                'param_count': param_count,
-                'body_length': len(body)
-            })
+        return {
+            'structure_hash': structure_hash,
+            'tokens': tokens,
+            'functions': functions
+        }
 
-        return structures
+    def _detect_java_plagiarism(self, submissions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Detect plagiarism in Java code."""
+        processed_submissions = []
+
+        for submission in submissions:
+            code_content = submission.get('content')
+            if code_content is None:
+                continue
+
+            try:
+                processed = self._process_java_code(code_content)
+                if processed:
+                    processed_submissions.append({
+                        'student_id': submission['student_id'],
+                        'student_name': submission['student_name'],
+                        'file_name': submission['file_name'],
+                        'structure_hash': processed['structure_hash'],
+                        'tokens': processed['tokens'],
+                        'methods': processed['methods'],
+                        'classes': processed['classes']
+                    })
+            except Exception as e:
+                print(f"Error processing Java code: {e}")
+
+        return self._compare_java_code(processed_submissions)
+
+    def _process_java_code(self, code: str) -> Dict[str, Any]:
+        """Process Java code for plagiarism detection."""
+        # Extract classes
+        classes = re.findall(r'class\s+(\w+)', code)
+
+        # Extract methods
+        method_pattern = r'(?:public|private|protected)?\s*(?:static)?\s*(?:\w+)\s+(\w+)\s*\([^)]*\)\s*\{'
+        methods = re.findall(method_pattern, code)
+
+        # Extract control structures
+        structures = []
+        structures.extend(['if'] * len(re.findall(r'\bif\s*\(', code)))
+        structures.extend(['for'] * len(re.findall(r'\bfor\s*\(', code)))
+        structures.extend(['while'] * len(re.findall(r'\bwhile\s*\(', code)))
+        structures.extend(['switch'] * len(re.findall(r'\bswitch\s*\(', code)))
+
+        structure_hash = hashlib.md5('_'.join(sorted(structures + methods + classes)).encode()).hexdigest()
+        tokens = re.findall(r'\w+|[{}();,]', code)
+
+        return {
+            'structure_hash': structure_hash,
+            'tokens': tokens,
+            'methods': methods,
+            'classes': classes
+        }
+
+    def _compare_generic_code(self, processed_submissions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Generic code comparison for non-Python languages."""
+        if len(processed_submissions) < 2:
+            return []
+
+        results = []
+        for i in range(len(processed_submissions)):
+            for j in range(i + 1, len(processed_submissions)):
+                sub1 = processed_submissions[i]
+                sub2 = processed_submissions[j]
+
+                structure_sim = 1.0 if sub1['structure_hash'] == sub2['structure_hash'] else 0.0
+                token_sim = self._calculate_sequence_similarity(sub1['tokens'], sub2['tokens'])
+                function_sim = self._calculate_function_similarity(sub1['functions'], sub2['functions'])
+
+                combined_sim = (0.4 * structure_sim + 0.3 * token_sim + 0.3 * function_sim)
+
+                results.append({
+                    'student1_id': sub1['student_id'],
+                    'student1_name': sub1['student_name'],
+                    'student1_file': sub1['file_name'],
+                    'student2_id': sub2['student_id'],
+                    'student2_name': sub2['student_name'],
+                    'student2_file': sub2['file_name'],
+                    'structure_similarity': float(structure_sim),
+                    'token_similarity': float(token_sim),
+                    'function_similarity': float(function_sim),
+                    'similarity': float(combined_sim),
+                    'flagged': combined_sim >= self.threshold
+                })
+
+        results.sort(key=lambda x: x['similarity'], reverse=True)
+        return results
+
+    def _compare_java_code(self, processed_submissions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Java-specific code comparison."""
+        if len(processed_submissions) < 2:
+            return []
+
+        results = []
+        for i in range(len(processed_submissions)):
+            for j in range(i + 1, len(processed_submissions)):
+                sub1 = processed_submissions[i]
+                sub2 = processed_submissions[j]
+
+                structure_sim = 1.0 if sub1['structure_hash'] == sub2['structure_hash'] else 0.0
+                token_sim = self._calculate_sequence_similarity(sub1['tokens'], sub2['tokens'])
+                method_sim = self._calculate_function_similarity(sub1['methods'], sub2['methods'])
+                class_sim = self._calculate_function_similarity(sub1['classes'], sub2['classes'])
+
+                combined_sim = (0.3 * structure_sim + 0.25 * token_sim + 0.25 * method_sim + 0.2 * class_sim)
+
+                results.append({
+                    'student1_id': sub1['student_id'],
+                    'student1_name': sub1['student_name'],
+                    'student1_file': sub1['file_name'],
+                    'student2_id': sub2['student_id'],
+                    'student2_name': sub2['student_name'],
+                    'student2_file': sub2['file_name'],
+                    'structure_similarity': float(structure_sim),
+                    'token_similarity': float(token_sim),
+                    'method_similarity': float(method_sim),
+                    'class_similarity': float(class_sim),
+                    'similarity': float(combined_sim),
+                    'flagged': combined_sim >= self.threshold
+                })
+
+        results.sort(key=lambda x: x['similarity'], reverse=True)
+        return results
 
     def _calculate_token_similarity(self, tokens1: List[Tuple[str, str]], tokens2: List[Tuple[str, str]]) -> float:
+        """Calculate token similarity using improved TF-IDF."""
+        str_tokens1 = [f"{token_type}:{token_val}" for token_type, token_val in tokens1]
+        str_tokens2 = [f"{token_type}:{token_val}" for token_type, token_val in tokens2]
 
-        str_tokens1 = ["{}:{}".format(token_type, token_val) for token_type, token_val in tokens1]
-        str_tokens2 = ["{}:{}".format(token_type, token_val) for token_type, token_val in tokens2]
-
-        if not str_tokens1 and not str_tokens2: return 1.0
-        if not str_tokens1 or not str_tokens2: return 0.0
-
-        corpus = [' '.join(str_tokens1), ' '.join(str_tokens2)]
+        if not str_tokens1 and not str_tokens2:
+            return 1.0
+        if not str_tokens1 or not str_tokens2:
+            return 0.0
 
         try:
             vectorizer = TfidfVectorizer(min_df=1)
+            corpus = [' '.join(str_tokens1), ' '.join(str_tokens2)]
             tfidf_matrix = vectorizer.fit_transform(corpus)
+
             if tfidf_matrix.shape[1] == 0:
                 return 0.0
+
             return cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0]
-        except ValueError:
-            set1 = set(str_tokens1)
-            set2 = set(str_tokens2)
-            if not set1 and not set2: return 1.0
-            if not set1 or not set2: return 0.0
+        except:
+            # Fallback to Jaccard similarity
+            set1, set2 = set(str_tokens1), set(str_tokens2)
+            if not set1 and not set2:
+                return 1.0
+            if not set1 or not set2:
+                return 0.0
 
             intersection = len(set1.intersection(set2))
             union = len(set1.union(set2))
             return intersection / union if union > 0 else 0.0
-        except Exception as e:
-            print(f"Error in _calculate_token_similarity: {e}")
-            return 0.0
 
     def _calculate_ast_similarity(self, nodes1: List[Dict[str, Any]], nodes2: List[Dict[str, Any]]) -> float:
+        """Calculate AST similarity using improved vector comparison."""
 
         def get_node_type_counts(nodes: List[Dict[str, Any]]) -> Dict[str, int]:
             counts = {}
@@ -704,15 +759,19 @@ class CodePlagiarismDetector(PlagiarismDetector):
         counts1 = get_node_type_counts(nodes1)
         counts2 = get_node_type_counts(nodes2)
 
-        if not counts1 and not counts2: return 1.0
-        if not counts1 or not counts2: return 0.0
+        if not counts1 and not counts2:
+            return 1.0
+        if not counts1 or not counts2:
+            return 0.0
 
         all_node_types = set(counts1.keys()).union(set(counts2.keys()))
-        if not all_node_types: return 1.0
+        if not all_node_types:
+            return 1.0
 
         vec1 = np.array([counts1.get(nt, 0) for nt in all_node_types])
         vec2 = np.array([counts2.get(nt, 0) for nt in all_node_types])
 
+        # Use cosine similarity
         dot_product = np.dot(vec1, vec2)
         norm_vec1 = np.linalg.norm(vec1)
         norm_vec2 = np.linalg.norm(vec2)
@@ -722,91 +781,66 @@ class CodePlagiarismDetector(PlagiarismDetector):
 
         return dot_product / (norm_vec1 * norm_vec2)
 
-    def _calculate_structure_similarity(self, structures1: List[Dict[str, Any]],
-                                        structures2: List[Dict[str, Any]]) -> float:
-        """Calculate similarity between code structures.
-
-        Args:
-            structures1: First list of structure dictionaries.
-            structures2: Second list of structure dictionaries.
-
-        Returns:
-            Similarity score between 0 and 1.
-        """
-        if not structures1 and not structures2:
-            return 1.0  # Both are empty, perfect match
-
-        if not structures1 or not structures2:
-            return 0.0  # One is empty, no match
-
-        # Count types of structures
-        def count_structure_types(structures):
-            counts = {}
-            for struct in structures:
-                struct_type = struct['type']
-                counts[struct_type] = counts.get(struct_type, 0) + 1
-            return counts
-
-        type_counts1 = count_structure_types(structures1)
-        type_counts2 = count_structure_types(structures2)
-
-        # Get all unique structure types
-        all_types = set(type_counts1.keys()) | set(type_counts2.keys())
-
-        # Create vectors from counts
-        vec1 = np.array([type_counts1.get(t, 0) for t in all_types])
-        vec2 = np.array([type_counts2.get(t, 0) for t in all_types])
-
-        # Calculate cosine similarity
-        dot_product = np.dot(vec1, vec2)
-        norm1 = np.linalg.norm(vec1)
-        norm2 = np.linalg.norm(vec2)
-
-        if norm1 == 0 or norm2 == 0:
+    def _calculate_normalized_similarity(self, code1: str, code2: str) -> float:
+        """Calculate similarity between normalized code strings."""
+        if not code1.strip() and not code2.strip():
+            return 1.0
+        if not code1.strip() or not code2.strip():
             return 0.0
 
-        type_similarity = dot_product / (norm1 * norm2)
+        # Simple sequence matcher approach
+        words1 = code1.split()
+        words2 = code2.split()
 
-        # Function similarity - compare function names and complexity
-        function_similarity = 0.0
-        functions1 = [s for s in structures1 if s['type'] == 'function']
-        functions2 = [s for s in structures2 if s['type'] == 'function']
+        if not words1 and not words2:
+            return 1.0
+        if not words1 or not words2:
+            return 0.0
 
-        if functions1 and functions2:
-            # Create a set of function names in each submission
-            names1 = set(f['name'] for f in functions1)
-            names2 = set(f['name'] for f in functions2)
+        # Calculate longest common subsequence ratio
+        def lcs_length(x, y):
+            m, n = len(x), len(y)
+            dp = [[0] * (n + 1) for _ in range(m + 1)]
 
-            # Check name overlap
-            common_names = names1.intersection(names2)
-            name_similarity = len(common_names) / max(len(names1), len(names2)) if max(len(names1),
-                                                                                       len(names2)) > 0 else 0
+            for i in range(1, m + 1):
+                for j in range(1, n + 1):
+                    if x[i - 1] == y[j - 1]:
+                        dp[i][j] = dp[i - 1][j - 1] + 1
+                    else:
+                        dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
 
-            # Compare function complexity for common functions
-            complexity_similarity = 0.0
-            if common_names:
-                complexities = []
-                for name in common_names:
-                    f1 = next(f for f in functions1 if f['name'] == name)
-                    f2 = next(f for f in functions2 if f['name'] == name)
+            return dp[m][n]
 
-                    # Compare parameters, loops, conditionals
-                    param_sim = 1.0 if f1['param_count'] == f2['param_count'] else 0.0
-                    loops_sim = 1.0 if f1['loops'] == f2['loops'] else 0.0
-                    cond_sim = 1.0 if f1['conditionals'] == f2['conditionals'] else 0.0
+        lcs_len = lcs_length(words1, words2)
+        max_len = max(len(words1), len(words2))
 
-                    # Weighted average
-                    func_sim = (0.3 * param_sim + 0.35 * loops_sim + 0.35 * cond_sim)
-                    complexities.append(func_sim)
+        return lcs_len / max_len if max_len > 0 else 0.0
 
-                complexity_similarity = sum(complexities) / len(complexities) if complexities else 0
+    def _calculate_sequence_similarity(self, seq1: List[str], seq2: List[str]) -> float:
+        """Calculate similarity between two sequences."""
+        if not seq1 and not seq2:
+            return 1.0
+        if not seq1 or not seq2:
+            return 0.0
 
-            function_similarity = 0.6 * name_similarity + 0.4 * complexity_similarity
+        set1, set2 = set(seq1), set(seq2)
+        intersection = len(set1.intersection(set2))
+        union = len(set1.union(set2))
 
-        # Combine type and function similarity
-        combined_similarity = 0.5 * type_similarity + 0.5 * function_similarity
+        return intersection / union if union > 0 else 0.0
 
-        return combined_similarity
+    def _calculate_function_similarity(self, funcs1: List[str], funcs2: List[str]) -> float:
+        """Calculate similarity between function lists."""
+        if not funcs1 and not funcs2:
+            return 1.0
+        if not funcs1 or not funcs2:
+            return 0.0
+
+        set1, set2 = set(funcs1), set(funcs2)
+        intersection = len(set1.intersection(set2))
+        union = len(set1.union(set2))
+
+        return intersection / union if union > 0 else 0.0
 
 
 class PlagiarismManager:
@@ -819,21 +853,10 @@ class PlagiarismManager:
         self.detectors[submission_type] = detector
 
     def detect_plagiarism(self, submission_type: str, submissions: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Detect plagiarism for a given submission type.
-
-        Args:
-            submission_type: The type of submission (e.g., 'text', 'code').
-            submissions: A list of submission dictionaries. Each dictionary should contain
-                         'student_id', 'student_name', 'file_name', and 'content'.
-
-        Returns:
-            A plagiarism report dictionary.
-        """
+        """Detect plagiarism for a given submission type."""
         if submission_type not in self.detectors:
-            # Consider logging an error or returning a specific error structure
             print(f"Error: No detector registered for submission type '{submission_type}'")
-            return {  # Return a default empty report structure
+            return {
                 'total_submissions': len(submissions),
                 'total_comparisons': 0,
                 'flagged_pairs': 0,
@@ -845,7 +868,6 @@ class PlagiarismManager:
 
         detector = self.detectors[submission_type]
         comparison_results = detector.detect(submissions)
-
         report = detector.generate_report(comparison_results, total_submissions_compared=len(submissions))
 
         return report

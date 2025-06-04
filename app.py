@@ -55,7 +55,6 @@ with st.sidebar:
 # Language mappings
 LANGUAGE_MAPPINGS = {
     'python': {'extensions': ['.py'], 'display': 'Python'},
-    'java': {'extensions': ['.java'], 'display': 'Java'},
     'c': {'extensions': ['.c'], 'display': 'C'},
     'cpp': {'extensions': ['.cpp', '.cc', '.cxx', '.c++'], 'display': 'C++'},
     'javascript': {'extensions': ['.js'], 'display': 'JavaScript'}
@@ -111,9 +110,8 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("### Supported Languages")
 st.sidebar.markdown("**Code Grading & Plagiarism:**")
 st.sidebar.markdown("- Python (.py)")
-st.sidebar.markdown("- Java masih error(.java)")
-st.sidebar.markdown("- C masih error(.c)")
-st.sidebar.markdown("- C++ masih error(.cpp, .cc, .cxx)")
+st.sidebar.markdown("- C (.c)")
+st.sidebar.markdown("- C++ (.cpp, .cc, .cxx)")
 st.sidebar.markdown("- JavaScript (.js)")
 st.sidebar.markdown("**Text Analysis:**")
 st.sidebar.markdown("- Essays & Short Answers")
@@ -440,12 +438,10 @@ def render_code_grading():
 
     with st.form("code_grading_form"):
         st.markdown("#### Grading Criteria")
-        reference_code = st.text_area("Reference Implementation (Optional)", height=200,
-                                      placeholder="Enter reference code...", key="code_ref_impl")
 
         col1, col2 = st.columns(2)
         with col1:
-            available_languages = ['python', 'java', 'c', 'cpp', 'javascript']
+            available_languages = ['python', 'c', 'cpp', 'javascript']
             language = st.selectbox("Programming Language",
                                     options=available_languages,
                                     format_func=lambda x: LANGUAGE_MAPPINGS[x]['display'],
@@ -461,11 +457,6 @@ def render_code_grading():
     {"function_name": "add", "input": "2, 3", "expected_output": "5"},
     {"assertion": "submission.multiply(4, 5) == 20"},
     {"function_name": "factorial", "input": "5", "expected_output": "120"}
-]'''
-        elif language == 'java':
-            example_tests = '''[
-    {"method_call": "Submission.add(2, 3)", "expected_output": "5"},
-    {"method_call": "Submission.multiply(4, 5)", "expected_output": "20"}
 ]'''
         elif language in ['c', 'cpp']:
             example_tests = '''[
@@ -825,7 +816,7 @@ def render_code_plagiarism():
 
     with st.form("code_plagiarism_form"):
         st.markdown("#### Detection Settings")
-        available_languages = ['python', 'java', 'c', 'cpp', 'javascript']
+        available_languages = ['python', 'c', 'cpp', 'javascript']
         language_code_plag = st.selectbox(
             "Programming Language",
             options=available_languages,

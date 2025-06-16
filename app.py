@@ -434,7 +434,9 @@ def render_code_grading():
             detected_languages.add(lang)
 
     if detected_languages:
-        st.info(f"Detected languages: {', '.join([LANGUAGE_MAPPINGS[lang]['display'] for lang in detected_languages])}")
+        # Added safety check to prevent KeyError if a language is detected but not in mappings
+        display_langs = [LANGUAGE_MAPPINGS[lang]['display'] for lang in detected_languages if lang in LANGUAGE_MAPPINGS]
+        st.info(f"Detected languages: {', '.join(display_langs)}")
 
     with st.form("code_grading_form"):
         st.markdown("#### Grading Criteria")
@@ -448,6 +450,16 @@ def render_code_grading():
                                     index=0, key="code_lang")
         with col2:
             total_points = st.number_input("Total Points", min_value=1, value=100, key="code_total_points")
+
+        # FIX: Changed label and help text to indicate this field is optional.
+        reference_code = st.text_area(
+            "Reference Code (Optional)", 
+            height=200,
+            placeholder="Enter the model/reference code solution...",
+            key="code_reference_solution",
+            help="Provide a model solution to enable structural or similarity-based grading. If omitted, grading will be based solely on test case results."
+        )
+
 
         st.markdown("#### Test Cases Configuration")
 
@@ -480,6 +492,7 @@ def render_code_grading():
         submitted = st.form_submit_button("Start Code Grading")
 
     if submitted:
+        # FIX: Removed the validation check for reference_code. Now, only test cases are required.
         if not test_cases_json:
             logger.warning("Code grading attempted with empty test cases")
             st.error("Test cases JSON cannot be empty. Please provide test cases.")
@@ -494,9 +507,14 @@ def render_code_grading():
                     logger.debug(f"Test cases: {test_cases}")
 
                     grading_manager = GradingManager()
+                    
+                    # FIX: Pass reference_code (which can be an empty string) to the grader.
+                    # Your CodeGrader class should handle an empty or None answer_key gracefully.
                     code_grader = CodeGrader(
-                        answer_key=reference_code, test_cases=test_cases,
-                        language=language, total_points=total_points
+                        answer_key=reference_code, # This is now optional
+                        test_cases=test_cases,
+                        language=language, 
+                        total_points=total_points
                     )
                     logger.debug(f"CodeGrader created for {language}")
 

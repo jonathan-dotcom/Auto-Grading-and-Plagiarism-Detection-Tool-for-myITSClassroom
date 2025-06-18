@@ -1,3 +1,4 @@
+# grader.py v2 (Fixed Round 2) - Modified for Local C/C++ Compilation
 import os
 import tempfile
 import subprocess
@@ -188,7 +189,9 @@ class CodeGrader(BaseGrader):
         logger.debug(f"Test cases: {len(test_cases)} cases")
         logger.debug(f"Total points: {total_points}")
 
-        self.client = self._initialize_docker()
+        # Only initialize Docker for non-C/C++ languages
+        if self.language not in ['c', 'cpp']:
+            self.client = self._initialize_docker()
 
     def _initialize_docker(self):
         """Initialize Docker client with fallback options."""
@@ -275,8 +278,8 @@ class CodeGrader(BaseGrader):
                 logger.debug("Grading Python submission")
                 test_results = self._grade_python(submission, temp_dir)
             elif self.language in ['c', 'cpp']:
-                logger.debug(f"Grading {self.language.upper()} submission")
-                test_results = self._grade_c_cpp(submission, temp_dir)
+                logger.debug(f"Grading {self.language.upper()} submission with local compiler")
+                test_results = self._grade_c_cpp_local(submission, temp_dir)
             elif self.language in ['javascript', 'js']:
                 logger.debug("Grading JavaScript submission")
                 test_results = self._grade_javascript(submission, temp_dir)
@@ -408,16 +411,23 @@ if __name__ == '__main__':
                                      ["/bin/sh", "-c", "cd /app && python test_submission.py"],
                                      temp_dir)
 
-    def _grade_c_cpp(self, submission: str, temp_dir: str) -> List[Dict[str, Any]]:
-        """Grade a C/C++ submission without modifying the original code."""
+    def _grade_c_cpp_local(self, submission: str, temp_dir: str) -> List[Dict[str, Any]]:
+        """Grade a C/C++ submission using local compiler."""
         is_cpp = self.language == 'cpp'
         file_ext = '.cpp' if is_cpp else '.c'
         compiler = 'g++' if is_cpp else 'gcc'
 
-        logger.info(f"Grading {self.language.upper()} submission")
+        logger.info(f"Grading {self.language.upper()} submission locally")
         logger.debug(f"Compiler: {compiler}, Extension: {file_ext}")
 
-        # Write the original submission file (unchanged)
+        # Check if compiler is available
+        try:
+            subprocess.run([compiler, '--version'], capture_output=True, check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            logger.error(f"{compiler} not found on system")
+            return [{'name': 'compiler_check', 'passed': False, 'message': f'{compiler} not found on system'}]
+
+        # Write the original submission file
         submission_path = os.path.join(temp_dir, f'submission{file_ext}')
         with open(submission_path, 'w') as f:
             f.write(submission)
@@ -428,15 +438,13 @@ if __name__ == '__main__':
         functions_info = self._analyze_c_cpp_submission(submission, is_cpp)
         logger.debug(f"Detected functions: {functions_info}")
 
-        # Create header file for function declarations
-        header_content = self._create_c_cpp_header(functions_info, is_cpp)
-        header_path = os.path.join(temp_dir, 'functions.h')
-        with open(header_path, 'w') as f:
-            f.write(header_content)
+        # Create modified submission that renames main
+        modified_submission_path = os.path.join(temp_dir, f'submission_modified{file_ext}')
+        modified_submission = re.sub(r'int\s+main\s*\(\s*\)', 'int student_main()', submission)
+        with open(modified_submission_path, 'w') as f:
+            f.write(modified_submission)
 
-        logger.debug(f"Created header file: {header_path}")
-
-        # Create separate test file that uses the functions
+        # Create test file
         test_content = self._create_c_cpp_test_file(functions_info, is_cpp)
         test_path = os.path.join(temp_dir, f'test{file_ext}')
         with open(test_path, 'w') as f:
@@ -444,14 +452,80 @@ if __name__ == '__main__':
 
         logger.debug(f"Created test file: {test_path}")
 
-        # Create compilation script that handles the original code
-        compile_script = self._create_c_cpp_compile_script_no_modify(compiler, file_ext)
+        # Compile the test program
+        compiler_flags = ['-std=c++11' if is_cpp else '-std=c11', '-lm']
+        executable_path = os.path.join(temp_dir, 'test_program')
 
-        logger.debug(f"Compile script: {compile_script}")
+        try:
+            compile_result = subprocess.run(
+                [compiler] + compiler_flags + ['-o', executable_path, test_path],
+                cwd=temp_dir,
+                capture_output=True,
+                text=True
+            )
 
-        return self._run_docker_test_enhanced('gcc:latest',
-                                              ["/bin/sh", "-c", compile_script],
-                                              temp_dir)
+            if compile_result.returncode != 0:
+                logger.error(f"Compilation failed: {compile_result.stderr}")
+                return [{
+                    'name': 'compilation',
+                    'passed': False,
+                    'message': f"Compilation error: {compile_result.stderr[:500]}"
+                }]
+
+            logger.info("Compilation successful")
+
+            # Run the test program
+            run_result = subprocess.run(
+                [executable_path],
+                cwd=temp_dir,
+                capture_output=True,
+                text=True,
+                timeout=10  # 10 second timeout
+            )
+
+            output = run_result.stdout
+            logger.debug(f"Program output: {output}")
+
+            # Parse JSON output
+            json_matches = re.findall(r'\[.*?\]', output, re.DOTALL)
+
+            if json_matches:
+                json_str = json_matches[-1].strip()
+                logger.debug(f"Found JSON output: {json_str}")
+
+                try:
+                    result = json.loads(json_str)
+                    logger.info(f"Successfully parsed {len(result)} test results")
+                    return result
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse JSON: {e}")
+                    return [{
+                        'name': 'json_parse_error',
+                        'passed': False,
+                        'message': f"JSON parse error: {str(e)}"
+                    }]
+            else:
+                logger.warning("No JSON output found")
+                return [{
+                    'name': 'execution',
+                    'passed': False,
+                    'message': f"No JSON output found. Raw output: {output[:500]}"
+                }]
+
+        except subprocess.TimeoutExpired:
+            logger.error("Program execution timed out")
+            return [{
+                'name': 'timeout',
+                'passed': False,
+                'message': "Program execution timed out (10 seconds)"
+            }]
+        except Exception as e:
+            logger.error(f"Execution error: {str(e)}")
+            return [{
+                'name': 'execution',
+                'passed': False,
+                'message': f"Execution error: {str(e)}"
+            }]
 
     def _analyze_c_cpp_submission(self, submission: str, is_cpp: bool) -> Dict[str, Any]:
         """Analyze C/C++ submission to extract function information without modifying it."""
@@ -481,12 +555,14 @@ if __name__ == '__main__':
                 classes.append(class_name)
 
         # Extract regular C functions (works for both C and C++)
-        # Look for function definitions (not just declarations)
-        function_pattern = r'(\w+)\s+(\w+)\s*\([^)]*\)\s*\{'
-        function_matches = re.findall(function_pattern, submission)
+        # Improved pattern to better capture return types including pointers and const
+        function_pattern = r'(?:^|\n)\s*(?:static\s+)?(?:inline\s+)?(?:const\s+)?(\w+(?:\s*\*)?)\s+(\w+)\s*\([^)]*\)\s*\{'
+        function_matches = re.findall(function_pattern, submission, re.MULTILINE)
 
         for return_type, func_name in function_matches:
             if func_name != 'main':  # Skip main function
+                # Clean up return type (remove extra spaces)
+                return_type = return_type.strip()
                 functions.append({
                     'name': func_name,
                     'return_type': return_type,
@@ -501,71 +577,28 @@ if __name__ == '__main__':
             'has_main': 'main' in submission
         }
 
-    def _create_c_cpp_header(self, functions_info: Dict[str, Any], is_cpp: bool) -> str:
-        """Create header file with function declarations."""
-
-        header = """#ifndef FUNCTIONS_H
-#define FUNCTIONS_H
-
-"""
-
-        if is_cpp:
-            header += """#ifdef __cplusplus
-extern "C" {
-#endif
-
-"""
-
-        # Add function declarations
-        for func in functions_info['functions']:
-            if func['class'] is None:  # Regular C functions
-                params = self._get_function_params(func['name'])
-                header += f"extern {func['return_type']} {func['name']}{params};\n"
-
-        if is_cpp:
-            header += """
-#ifdef __cplusplus
-}
-#endif
-
-"""
-
-            # Add class declarations for C++
-            for class_name in functions_info['classes']:
-                header += f"// {class_name} class methods available\n"
-
-        header += "\n#endif // FUNCTIONS_H\n"
-
-        return header
-
     def _create_c_cpp_test_file(self, functions_info: Dict[str, Any], is_cpp: bool) -> str:
-        """Create test file that works with original submission."""
+        """Create test file that works with original submission by including it."""
+
+        submission_filename = "submission_modified.cpp" if is_cpp else "submission_modified.c"
 
         # Basic includes
         includes = """#include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
+#include <stdbool.h>
 """
 
         if is_cpp:
             includes += """#include <iostream>
 #include <string>
+#include <vector>
+#include <sstream>
 using namespace std;
 """
-
-        # Include the functions header
-        includes += '#include "functions.h"\n\n'
-
-        # Forward declarations for functions we'll test
-        forward_declarations = "// Forward declarations\n"
-        for func in functions_info['functions']:
-            if func['class'] is None:
-                # For regular functions, we'll link them from the submission
-                params = self._get_function_params(func['name'])
-                forward_declarations += f"extern {func['return_type']} {func['name']}{params};\n"
-
-        forward_declarations += "\n"
+        # Directly include the student's code file
+        includes += f'#include "{submission_filename}"\n\n'
 
         # Test runner main function
         test_main = """
@@ -573,10 +606,29 @@ using namespace std;
 int passed_tests = 0;
 int total_tests = 0;
 
+// Helper to escape JSON strings
+void print_escaped(const char* s) {
+    while (*s) {
+        if (*s == '"' || *s == '\\\\') {
+            putchar('\\\\');
+        }
+        putchar(*s);
+        s++;
+    }
+}
+
+// Helper for floating point comparison with tolerance
+int double_equals(double a, double b, double tolerance) {
+    double diff = a - b;
+    if (diff < 0) diff = -diff;
+    return diff < tolerance;
+}
+
 void print_test_result(const char* test_name, int passed, const char* message) {
     if (total_tests > 0) printf(", ");
-    printf("{\\"name\\": \\"%s\\", \\"passed\\": %s, \\"message\\": \\"%s\\"}",
-           test_name, passed ? "true" : "false", message);
+    printf("{\\"name\\": \\"%s\\", \\"passed\\": %s, \\"message\\": \\"", test_name, passed ? "true" : "false");
+    print_escaped(message);
+    printf("\\"}");
     if (passed) passed_tests++;
     total_tests++;
 }
@@ -591,34 +643,90 @@ int main() {
             test_name = f"test_{i + 1}"
 
             if 'function_call' in test_case and 'expected_output' in test_case:
-                # Adapt function call based on detected functions
                 adapted_call = self._adapt_function_call(test_case['function_call'], functions_info)
+                expected_output = test_case['expected_output']
+
+                # C++ bools are true/false, C bools are 1/0. Let's standardize.
+                if str(expected_output).lower() == 'true': expected_output = '1'
+                if str(expected_output).lower() == 'false': expected_output = '0'
 
                 test_main += f"""
     // Test {i + 1}: {test_case.get('description', 'Test case')}
     {{
-        int result, expected;
         char message[256] = "";
+        """
 
-        #ifdef __cplusplus
+                if is_cpp:
+                    test_main += f"""
         try {{
-        #endif
-            result = {adapted_call};
-            expected = {test_case['expected_output']};
+            auto result = {adapted_call};
+            auto expected = {expected_output};
 
             if (result == expected) {{
                 print_test_result("{test_name}", 1, "");
             }} else {{
-                snprintf(message, sizeof(message), "Expected %d, got %d", expected, result);
+                std::stringstream ss;
+                ss << "Expected " << expected << ", got " << result;
+                snprintf(message, sizeof(message), "%s", ss.str().c_str());
                 print_test_result("{test_name}", 0, message);
             }}
-        #ifdef __cplusplus
         }} catch (...) {{
             print_test_result("{test_name}", 0, "Function call threw an exception");
         }}
-        #endif
-    }}
 """
+                else:
+                    # For C, we need to determine the return type from the test case or function info
+                    # Check if test case specifies return type, otherwise infer it
+                    if 'return_type' in test_case:
+                        return_type = test_case['return_type']
+                    else:
+                        return_type = self._get_return_type_for_function(adapted_call, functions_info)
+
+                        # If still not found, infer from expected output
+                        if return_type == "int" and isinstance(expected_output, (float, str)) and '.' in str(
+                                expected_output):
+                            return_type = "double"
+
+                    # Check if we're dealing with floating point
+                    is_float_type = return_type in ["float", "double"]
+
+                    test_main += f"""
+        {return_type} result = {adapted_call};
+        {return_type} expected = {expected_output};
+
+        int test_passed = 0;
+        """
+
+                    if is_float_type:
+                        test_main += f"""
+        // Use tolerance-based comparison for floating point
+        test_passed = double_equals((double)result, (double)expected, 0.0001);
+
+        if (test_passed) {{
+            print_test_result("{test_name}", 1, "");
+        }} else {{
+            snprintf(message, sizeof(message), "Expected %.6f, got %.6f", (double)expected, (double)result);
+            print_test_result("{test_name}", 0, message);
+        }}
+"""
+                    else:
+                        test_main += f"""
+        test_passed = (result == expected);
+
+        if (test_passed) {{
+            print_test_result("{test_name}", 1, "");
+        }} else {{
+            if (strcmp("{return_type}", "char") == 0) {{
+                snprintf(message, sizeof(message), "Expected '%c', got '%c'", expected, result);
+            }} else if (strcmp("{return_type}", "long") == 0 || strcmp("{return_type}", "long long") == 0) {{
+                snprintf(message, sizeof(message), "Expected %lld, got %lld", (long long)expected, (long long)result);
+            }} else {{
+                snprintf(message, sizeof(message), "Expected %d, got %d", (int)expected, (int)result);
+            }}
+            print_test_result("{test_name}", 0, message);
+        }}
+"""
+                test_main += "    }\n"
             else:
                 test_main += f"""
     print_test_result("{test_name}", 0, "Invalid test case format");
@@ -629,21 +737,7 @@ int main() {
     return 0;
 }
 """
-
-        return includes + forward_declarations + test_main
-
-    def _get_function_params(self, func_name: str) -> str:
-        """Get function parameters based on common function signatures."""
-        common_signatures = {
-            'add': '(int a, int b)',
-            'multiply': '(int a, int b)',
-            'factorial': '(int n)',
-            'fibonacci': '(int n)',
-            'is_prime': '(int n)',
-            'isPrime': '(int n)',
-            'power': '(int base, int exp)'
-        }
-        return common_signatures.get(func_name, '(...)')
+        return includes + test_main
 
     def _adapt_function_call(self, function_call: str, functions_info: Dict[str, Any]) -> str:
         """Adapt function calls to work with the actual submission."""
@@ -682,164 +776,29 @@ int main() {
 
         return function_call
 
-    def _create_c_cpp_compile_script_no_modify(self, compiler: str, file_ext: str) -> str:
-        """Create compilation script that preserves original submission."""
+    def _get_return_type_for_function(self, function_call: str, functions_info: Dict[str, Any]) -> str:
+        """Get the return type of a function from the function call and info."""
+        import re
 
-        script = f"""
-echo "=== Files in /app ==="
-ls -la /app/
-echo "====================="
+        # Extract function name from the call
+        func_match = re.match(r'(\w+)\s*\(', function_call)
+        if not func_match:
+            return "int"  # Default to int
 
-echo "=== Original Submission ==="
-cat /app/submission{file_ext}
-echo "========================="
+        func_name = func_match.group(1)
 
-echo "=== Test File ==="
-cat /app/test{file_ext}
-echo "================"
+        # Look for the function in our analyzed functions
+        for func in functions_info['functions']:
+            if func['name'] == func_name or func['call_format'] == func_name:
+                return func.get('return_type', 'int')
 
-cd /app
-
-# Strategy 1: Try to compile submission as object file and link with test
-echo "=== Strategy 1: Object file compilation ==="
-
-# First, try to compile submission to object file (this might fail due to main, but worth trying)
-{compiler} -c -fPIC submission{file_ext} -o submission.o 2>/dev/null
-
-if [ -f submission.o ]; then
-    echo "Submission compiled to object file successfully"
-
-    # Now compile test file and link with submission object
-    {compiler} -lm -o test_program test{file_ext} submission.o 2>&1
-
-    if [ $? -eq 0 ]; then
-        echo "Linking successful, running tests..."
-        ./test_program 2>&1
-        exit 0
-    else
-        echo "Linking failed, trying next strategy..."
-    fi
-else
-    echo "Object compilation failed, trying next strategy..."
-fi
-
-# Strategy 2: Create a wrapper that renames main to avoid conflicts
-echo "=== Strategy 2: Main function handling ==="
-
-# Create a modified version of submission that renames main to student_main
-sed 's/int main(/int student_main(/g' submission{file_ext} > submission_modified{file_ext}
-
-echo "=== Modified Submission ==="
-cat submission_modified{file_ext}
-echo "=========================="
-
-# Try to compile the modified version with test
-{compiler} -lm -o test_program submission_modified{file_ext} test{file_ext} 2>&1
-
-if [ $? -eq 0 ]; then
-    echo "Modified compilation successful, running tests..."
-    ./test_program 2>&1
-    exit 0
-else
-    echo "Modified compilation failed, trying final strategy..."
-fi
-
-# Strategy 3: Extract only function definitions using preprocessor
-echo "=== Strategy 3: Function extraction ==="
-
-# Create a version with main function commented out
-sed 's/int main(/\/\/ int main(/g; s/^main(/\/\/ main(/g' submission{file_ext} > submission_no_main{file_ext}
-
-echo "=== No-Main Submission ==="
-cat submission_no_main{file_ext}
-echo "=========================="
-
-{compiler} -lm -o test_program submission_no_main{file_ext} test{file_ext} 2>&1
-
-if [ $? -eq 0 ]; then
-    echo "No-main compilation successful, running tests..."
-    ./test_program 2>&1
-else
-    echo "All compilation strategies failed"
-    echo '[{{"name": "compilation", "passed": false, "message": "Could not compile with any strategy"}}]'
-fi
-"""
-
-        return script
-
-    def _run_docker_test_enhanced(self, image: str, command: List[str], temp_dir: str) -> List[Dict[str, Any]]:
-        """Enhanced Docker test runner with better error handling for C/C++."""
-        logger.info(f"Running Docker test with image: {image}")
-        logger.debug(f"Command: {' '.join(command)}")
-        logger.debug(f"Volume mount: {temp_dir}:/app")
-
-        try:
-            start_time = time.time()
-
-            # Log files in temp_dir for debugging
-            logger.debug("Files in temp directory before execution:")
-            for file in os.listdir(temp_dir):
-                file_path = os.path.join(temp_dir, file)
-                if os.path.isfile(file_path):
-                    size = os.path.getsize(file_path)
-                    logger.debug(f"  {file} ({size} bytes)")
-
-            # Run the container
-            container = self.client.containers.run(
-                image,
-                command,
-                volumes={temp_dir: {'bind': '/app', 'mode': 'rw'}},  # Changed to read-write
-                remove=True,
-                stdout=True,
-                stderr=True
-            )
-
-            execution_time = time.time() - start_time
-            output = container.decode('utf-8')
-
-            logger.info(f"Docker execution completed in {execution_time:.2f} seconds")
-            logger.debug(f"Docker output: {output}")
-
-            # Log to Docker operations logger
-            docker_logger.info(f"DOCKER RUN: {image}")
-            docker_logger.debug(f"Command: {' '.join(command)}")
-            docker_logger.debug(f"Output: {output}")
-
-            # Parse JSON output - look for the last JSON array in the output
-            import re
-            json_matches = re.findall(r'\[.*?\]', output, re.DOTALL)
-
-            if json_matches:
-                # Take the last JSON match (in case there are multiple)
-                json_str = json_matches[-1].strip()
-                logger.debug(f"Found JSON output: {json_str}")
-
-                try:
-                    import json
-                    result = json.loads(json_str)
-                    logger.info(f"Successfully parsed {len(result)} test results")
-                    return result
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse JSON: {e}")
-                    logger.error(f"JSON string was: {json_str}")
-                    return [{'name': 'json_parse_error', 'passed': False, 'message': f"JSON parse error: {str(e)}"}]
-            else:
-                logger.warning("No JSON output found in Docker response")
-                logger.debug(f"Full output was: {output}")
-
-                # Check if it's a compilation error
-                if "error:" in output.lower() or "failed" in output.lower():
-                    return [{'name': 'compilation', 'passed': False, 'message': f"Compilation error: {output[-200:]}"}]
-                else:
-                    return [{'name': 'execution', 'passed': False,
-                             'message': f"No JSON output found. Raw output: {output[-200:]}"}]
-
-        except Exception as e:
-            logger.error(f"Docker execution error: {str(e)}")
-            docker_logger.error(f"DOCKER ERROR: {str(e)}")
-            import traceback
-            logger.error(f"Docker error traceback: {traceback.format_exc()}")
-            return [{'name': 'execution', 'passed': False, 'message': f"Docker execution error: {str(e)}"}]
+        # Common function return types based on naming patterns
+        if 'is_' in func_name.lower() or 'check' in func_name.lower():
+            return "int"  # boolean functions typically return int in C
+        elif 'sqrt' in func_name.lower() or 'average' in func_name.lower():
+            return "double"
+        else:
+            return "int"  # Default to int
 
     def _grade_javascript(self, submission: str, temp_dir: str) -> List[Dict[str, Any]]:
         """Grade a JavaScript submission."""
@@ -855,10 +814,15 @@ let testCount = 0;
 
 function assertEqual(expected, actual, testName) {
     testCount++;
-    if (expected === actual) {
+    // FIX: Use type-insensitive comparison by converting both to strings.
+    // This handles cases like `8` (number) vs `"8"` (string).
+    if (String(expected) == String(actual)) {
         results.push({name: testName, passed: true, message: ''});
     } else {
-        results.push({name: testName, passed: false, message: `Expected ${expected}, got ${actual}`});
+        // Enclose results in quotes for clarity in the message
+        const expectedStr = typeof expected === 'string' ? `"${expected}"` : expected;
+        const actualStr = typeof actual === 'string' ? `"${actual}"` : actual;
+        results.push({name: testName, passed: false, message: `Expected ${expectedStr}, got ${actualStr}`});
     }
 }
 
@@ -867,8 +831,15 @@ function assertEqual(expected, actual, testName) {
 
         for i, test_case in enumerate(self.test_cases):
             if 'function_call' in test_case and 'expected_output' in test_case:
+                js_call = f"submission.{test_case['function_call']}"
+                expected_output_str = json.dumps(test_case['expected_output'])
+
                 test_file_content += f"""
-assertEqual({test_case['expected_output']}, {test_case['function_call']}, 'test_{i + 1}');
+try {{
+    assertEqual({expected_output_str}, {js_call}, 'test_{i + 1}');
+}} catch (e) {{
+    results.push({{name: 'test_{i + 1}', passed: false, message: e.message}});
+}}
 """
 
         test_file_content += """
@@ -894,8 +865,6 @@ console.log(JSON.stringify(results));
         test_file_content = f"""
 import java.util.*;
 
-{submission}
-
 public class TestRunner {{
     public static void main(String[] args) {{
         System.out.print("[");
@@ -908,15 +877,17 @@ public class TestRunner {{
         if (!first) System.out.print(", ");
         first = false;
         try {{
-            Object result = {test_case['method_call']};
+            Object result = Submission.{test_case['method_call']};
             Object expected = {test_case['expected_output']};
             boolean passed = result.equals(expected);
-            System.out.printf("{{\\"name\\": \\"test_{i + 1}\\", \\"passed\\": %s, \\"message\\": \\"%s\\"}}", 
-                passed ? "true" : "false", 
-                passed ? "" : "Expected " + expected + ", got " + result);
+            String message = passed ? "" : "Expected " + expected + ", got " + result;
+            message = message.replace("\\"", "\\\\\\""); // Escape quotes
+            System.out.printf("{{\\"name\\": \\"test_{i + 1}\\", \\"passed\\": %s, \\"message\\": \\"%s\\"}}",
+                passed ? "true" : "false", message);
         }} catch (Exception e) {{
-            System.out.printf("{{\\"name\\": \\"test_{i + 1}\\", \\"passed\\": false, \\"message\\": \\"Exception: %s\\"}}", 
-                e.getMessage().replace("\\"", "\\\\\\""));
+            String errorMessage = e.getMessage().replace("\\"", "\\\\\\"");
+            System.out.printf("{{\\"name\\": \\"test_{i + 1}\\", \\"passed\\": false, \\"message\\": \\"Exception: %s\\"}}",
+                errorMessage);
         }}
 """
 
@@ -944,7 +915,7 @@ public class TestRunner {{
             start_time = time.time()
 
             # Log files in temp_dir for debugging
-            logger.debug("Files in temp directory before execution:")
+            logger.debug("Files in temporary directory before execution:")
             for file in os.listdir(temp_dir):
                 file_path = os.path.join(temp_dir, file)
                 if os.path.isfile(file_path):
@@ -954,7 +925,7 @@ public class TestRunner {{
             container = self.client.containers.run(
                 image,
                 command,
-                volumes={temp_dir: {'bind': '/app', 'mode': 'ro'}},
+                volumes={temp_dir: {'bind': '/app', 'mode': 'rw'}},  # Use rw for java compilation
                 remove=True,
                 stdout=True,
                 stderr=True

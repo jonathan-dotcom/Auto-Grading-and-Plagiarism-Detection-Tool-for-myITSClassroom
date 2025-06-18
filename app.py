@@ -1,3 +1,4 @@
+#app.py v2
 import os
 import time
 import tempfile
@@ -7,6 +8,8 @@ import plotly.express as px
 import json
 import logging
 from datetime import datetime
+import difflib
+import base64
 
 # Import logging configuration
 from logging_config import setup_logging, get_logger, log_function_entry, log_function_exit, log_error_with_traceback
@@ -132,11 +135,80 @@ def get_language_from_extension(extension):
     return None
 
 
+def reset_app_state():
+    """Reset all app state for new file upload"""
+    st.session_state.file_processor = None
+    st.session_state.submissions = None
+    st.session_state.categorized_submissions = None
+    st.session_state.grading_results = []
+    st.session_state.essay_grading_results = []
+    st.session_state.short_answer_grading_results = []
+    st.session_state.code_grading_results = []
+    st.session_state.plagiarism_results = {}
+    st.session_state.report_paths = {}
+    logger.info("App state reset for new file upload")
+
+
+def get_file_download_link(content: str, filename: str, mime_type: str = "text/plain"):
+    """Generate a download link for file content"""
+    b64 = base64.b64encode(content.encode()).decode()
+    return f'<a href="data:{mime_type};base64,{b64}" download="{filename}" class="download-link">📥 Download {filename}</a>'
+
+
+def show_diff_viewer(content1: str, content2: str, file1_name: str, file2_name: str):
+    """Show a diff viewer for two files"""
+    st.markdown("### 🔍 File Comparison")
+
+    # Create tabs for different views
+    tab1, tab2, tab3, tab4 = st.tabs(["Side by Side", "Unified Diff", f"📄 {file1_name}", f"📄 {file2_name}"])
+
+    with tab1:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown(f"**{file1_name}**")
+            st.markdown(get_file_download_link(content1, file1_name), unsafe_allow_html=True)
+            st.code(content1, language='auto', line_numbers=True)
+        with col2:
+            st.markdown(f"**{file2_name}**")
+            st.markdown(get_file_download_link(content2, file2_name), unsafe_allow_html=True)
+            st.code(content2, language='auto', line_numbers=True)
+
+    with tab2:
+        st.markdown("**Unified Diff View**")
+        # Generate diff
+        lines1 = content1.splitlines(keepends=True)
+        lines2 = content2.splitlines(keepends=True)
+        diff = difflib.unified_diff(lines1, lines2, fromfile=file1_name, tofile=file2_name, lineterm='')
+        diff_text = ''.join(diff)
+        if diff_text:
+            st.code(diff_text, language='diff')
+        else:
+            st.info("Files are identical")
+
+    with tab3:
+        st.markdown(f"**Content of {file1_name}**")
+        st.markdown(get_file_download_link(content1, file1_name), unsafe_allow_html=True)
+        st.code(content1, language='auto', line_numbers=True)
+
+    with tab4:
+        st.markdown(f"**Content of {file2_name}**")
+        st.markdown(get_file_download_link(content2, file2_name), unsafe_allow_html=True)
+        st.code(content2, language='auto', line_numbers=True)
+
+
 # Reusable File Upload Section
 def render_file_upload_section():
     logger.info("Rendering file upload section")
     st.header("Upload Assignment Files")
     st.markdown("Please upload the myITS Classroom assignment export ZIP file to begin.")
+
+    # Add reset button if files are already loaded
+    if st.session_state.submissions is not None:
+        col1, col2 = st.columns([3, 1])
+        with col2:
+            if st.button("🔄 Upload New File", type="secondary"):
+                reset_app_state()
+                st.rerun()
 
     uploaded_file = st.file_uploader("Upload myITS Classroom assignment export ZIP", type=['zip'],
                                      key="file_uploader_main")
@@ -258,9 +330,7 @@ def render_file_upload_section():
                 log_error_with_traceback(logger, e, "file upload processing")
                 st.error(error_msg)
                 # Clean up session state if processing fails
-                st.session_state.file_processor = None
-                st.session_state.submissions = None
-                st.session_state.categorized_submissions = None
+                reset_app_state()
             finally:
                 # Clean up the temporary zip file
                 if os.path.exists(zip_path):
@@ -278,7 +348,15 @@ def render_grading_page():
         render_file_upload_section()
         return
 
-    st.success(f"Submissions loaded: {len(st.session_state.submissions)} students. You can now configure grading.")
+    # Add file change button
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.success(f"Submissions loaded: {len(st.session_state.submissions)} students.")
+    with col2:
+        if st.button("🔄 Change File", type="secondary"):
+            reset_app_state()
+            st.rerun()
+
     st.markdown("---")
 
     # Assignment configuration
@@ -348,6 +426,8 @@ def render_essay_grading():
                             'student_id': submission['student_id'],
                             'student_name': submission['student_name'],
                             'file_name': submission['current_file']['name'],
+                            'file_path': file_path,
+                            'content': content,
                             'grade': grade_result
                         })
                     except Exception as e:
@@ -403,6 +483,8 @@ def render_short_answer_grading():
                             'student_id': submission['student_id'],
                             'student_name': submission['student_name'],
                             'file_name': submission['current_file']['name'],
+                            'file_path': file_path,
+                            'content': content,
                             'grade': grade_result
                         })
                     except Exception as e:
@@ -434,9 +516,7 @@ def render_code_grading():
             detected_languages.add(lang)
 
     if detected_languages:
-        # Added safety check to prevent KeyError if a language is detected but not in mappings
-        display_langs = [LANGUAGE_MAPPINGS[lang]['display'] for lang in detected_languages if lang in LANGUAGE_MAPPINGS]
-        st.info(f"Detected languages: {', '.join(display_langs)}")
+        st.info(f"Detected languages: {', '.join([LANGUAGE_MAPPINGS[lang]['display'] for lang in detected_languages])}")
 
     with st.form("code_grading_form"):
         st.markdown("#### Grading Criteria")
@@ -450,16 +530,6 @@ def render_code_grading():
                                     index=0, key="code_lang")
         with col2:
             total_points = st.number_input("Total Points", min_value=1, value=100, key="code_total_points")
-
-        # FIX: Changed label and help text to indicate this field is optional.
-        reference_code = st.text_area(
-            "Reference Code (Optional)", 
-            height=200,
-            placeholder="Enter the model/reference code solution...",
-            key="code_reference_solution",
-            help="Provide a model solution to enable structural or similarity-based grading. If omitted, grading will be based solely on test case results."
-        )
-
 
         st.markdown("#### Test Cases Configuration")
 
@@ -489,98 +559,130 @@ def render_code_grading():
         test_cases_json = st.text_area("Test Cases (JSON)", height=200, placeholder="Enter test cases...",
                                        key="code_test_cases")
 
+        # Add reference code input
+        reference_code = st.text_area("Reference Code (optional)", height=100,
+                                      placeholder="Enter reference solution (optional)...",
+                                      key="reference_code")
+
         submitted = st.form_submit_button("Start Code Grading")
 
     if submitted:
-        # FIX: Removed the validation check for reference_code. Now, only test cases are required.
         if not test_cases_json:
             logger.warning("Code grading attempted with empty test cases")
             st.error("Test cases JSON cannot be empty. Please provide test cases.")
         else:
             start_time = time.time()
-            logger.info(f"Starting code grading - Language: {language}, Students: {len(code_submissions)}")
 
-            with st.spinner("Grading code submissions..."):
-                try:
-                    test_cases = json.loads(test_cases_json)
-                    logger.info(f"Parsed {len(test_cases)} test cases")
-                    logger.debug(f"Test cases: {test_cases}")
+            # Filter submissions by selected language
+            filtered_submissions = []
+            for submission in code_submissions:
+                ext = submission['current_file']['extension']
+                file_lang = get_language_from_extension(ext)
+                if file_lang == language:
+                    filtered_submissions.append(submission)
 
-                    grading_manager = GradingManager()
-                    
-                    # FIX: Pass reference_code (which can be an empty string) to the grader.
-                    # Your CodeGrader class should handle an empty or None answer_key gracefully.
-                    code_grader = CodeGrader(
-                        answer_key=reference_code, # This is now optional
-                        test_cases=test_cases,
-                        language=language, 
-                        total_points=total_points
-                    )
-                    logger.debug(f"CodeGrader created for {language}")
+            logger.info(
+                f"Starting code grading - Language: {language}, Students: {len(filtered_submissions)} (filtered from {len(code_submissions)})")
 
-                    grading_manager.register_grader('code', code_grader)
-                    results = []
+            if not filtered_submissions:
+                st.warning(f"No {LANGUAGE_MAPPINGS[language]['display']} files found for grading.")
+            else:
+                with st.spinner(
+                        f"Grading {len(filtered_submissions)} {LANGUAGE_MAPPINGS[language]['display']} submissions..."):
+                    try:
+                        test_cases = json.loads(test_cases_json)
+                        logger.info(f"Parsed {len(test_cases)} test cases")
+                        logger.debug(f"Test cases: {test_cases}")
 
-                    for i, submission in enumerate(code_submissions):
-                        student_start = time.time()
-                        student_name = submission['student_name']
-                        logger.info(f"Grading {student_name} ({i + 1}/{len(code_submissions)})")
+                        grading_manager = GradingManager()
+                        code_grader = CodeGrader(
+                            answer_key=reference_code or "", test_cases=test_cases,
+                            language=language, total_points=total_points
+                        )
+                        logger.debug(f"CodeGrader created for {language}")
 
-                        try:
-                            file_path = submission['current_file']['path']
-                            logger.debug(f"Reading file: {file_path}")
+                        grading_manager.register_grader('code', code_grader)
+                        results = []
 
-                            content = st.session_state.file_processor.get_file_content(file_path)
-                            logger.debug(f"File content length: {len(content)} characters")
-                            logger.debug(f"File content preview: {content[:200]}...")
+                        for i, submission in enumerate(filtered_submissions):
+                            student_start = time.time()
+                            student_name = submission['student_name']
+                            logger.info(f"Grading {student_name} ({i + 1}/{len(filtered_submissions)})")
 
-                            grade_result = grading_manager.grade_submission('code', content)
-                            student_time = time.time() - student_start
+                            try:
+                                file_path = submission['current_file']['path']
+                                logger.debug(f"Reading file: {file_path}")
 
-                            logger.info(
-                                f"Graded {student_name} in {student_time:.2f}s - Score: {grade_result['points']}/{grade_result['max_points']}")
-                            logger.debug(f"Grade result for {student_name}: {grade_result}")
+                                content = st.session_state.file_processor.get_file_content(file_path)
+                                logger.debug(f"File content length: {len(content)} characters")
+                                logger.debug(f"File content preview: {content[:200]}...")
 
-                            results.append({
-                                'student_id': submission['student_id'],
-                                'student_name': submission['student_name'],
-                                'file_name': submission['current_file']['name'],
-                                'grade': grade_result
-                            })
+                                grade_result = grading_manager.grade_submission('code', content)
+                                student_time = time.time() - student_start
 
-                        except Exception as e:
-                            error_msg = f"Error grading {student_name}'s submission: {e}"
-                            logger.error(error_msg)
-                            log_error_with_traceback(grading_logger, e, f"grading {student_name}")
-                            st.error(error_msg)
+                                logger.info(
+                                    f"Graded {student_name} in {student_time:.2f}s - Score: {grade_result['points']}/{grade_result['max_points']}")
+                                logger.debug(f"Grade result for {student_name}: {grade_result}")
 
-                    total_time = time.time() - start_time
-                    logger.info(f"Code grading completed in {total_time:.2f}s - {len(results)} students graded")
+                                results.append({
+                                    'student_id': submission['student_id'],
+                                    'student_name': submission['student_name'],
+                                    'file_name': submission['current_file']['name'],
+                                    'file_path': file_path,
+                                    'content': content,
+                                    'grade': grade_result
+                                })
 
-                    st.session_state.grading_results.extend(results)
-                    st.session_state.code_grading_results = results
-                    st.success(f"Successfully graded {len(results)} code submissions!")
-                    st.rerun()
+                            except Exception as e:
+                                error_msg = f"Error grading {student_name}'s submission: {e}"
+                                logger.error(error_msg)
+                                log_error_with_traceback(grading_logger, e, f"grading {student_name}")
+                                st.error(error_msg)
 
-                except json.JSONDecodeError as e:
-                    error_msg = "Invalid JSON format for test cases. Please check your input."
-                    logger.error(f"JSON decode error: {e}")
-                    st.error(error_msg)
-                except Exception as e:
-                    error_msg = f"An unexpected error occurred during code grading: {e}"
-                    logger.error(error_msg)
-                    log_error_with_traceback(grading_logger, e, "code grading")
-                    st.error(error_msg)
+                        total_time = time.time() - start_time
+                        logger.info(f"Code grading completed in {total_time:.2f}s - {len(results)} students graded")
+
+                        st.session_state.grading_results.extend(results)
+                        st.session_state.code_grading_results = results
+                        st.success(
+                            f"Successfully graded {len(results)} {LANGUAGE_MAPPINGS[language]['display']} submissions!")
+                        st.rerun()
+
+                    except json.JSONDecodeError as e:
+                        error_msg = "Invalid JSON format for test cases. Please check your input."
+                        logger.error(f"JSON decode error: {e}")
+                        st.error(error_msg)
+                    except Exception as e:
+                        error_msg = f"An unexpected error occurred during code grading: {e}"
+                        logger.error(error_msg)
+                        log_error_with_traceback(grading_logger, e, "code grading")
+                        st.error(error_msg)
 
     if st.session_state.code_grading_results:
         display_code_results(st.session_state.code_grading_results)
 
 
 def display_grading_results(results, assignment_type):
-    """Display grading results with statistics."""
+    """Display grading results with statistics and download options."""
+    st.subheader(f"{assignment_type} Grading Results")
+
+    # Add download option for all graded files
+    if results:
+        with st.expander("📥 Download Graded Files"):
+            for r in results:
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.write(f"**{r['student_name']}** - {r['file_name']} (Score: {r['grade']['points']})")
+                with col2:
+                    content = r.get('content', '')
+                    if content:
+                        st.markdown(get_file_download_link(content, f"{r['student_name']}_{r['file_name']}"),
+                                    unsafe_allow_html=True)
+
     result_data = [{
         'Student ID': r['student_id'],
         'Student Name': r['student_name'],
+        'File': r['file_name'],
         'Points': r['grade']['points'],
         'Percentage': f"{r['grade']['percentage']}%",
         'Similarity': f"{r['grade']['similarity'] * 100:.2f}%" if 'similarity' in r['grade'] else 'N/A'
@@ -604,10 +706,26 @@ def display_grading_results(results, assignment_type):
 
 
 def display_short_answer_results(results):
-    """Display short answer specific results."""
+    """Display short answer specific results with download options."""
+    st.subheader("Short Answer Grading Results")
+
+    # Add download option for all graded files
+    if results:
+        with st.expander("📥 Download Graded Files"):
+            for r in results:
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.write(f"**{r['student_name']}** - {r['file_name']} (Score: {r['grade']['points']})")
+                with col2:
+                    content = r.get('content', '')
+                    if content:
+                        st.markdown(get_file_download_link(content, f"{r['student_name']}_{r['file_name']}"),
+                                    unsafe_allow_html=True)
+
     result_data = [{
         'Student ID': r['student_id'],
         'Student Name': r['student_name'],
+        'File': r['file_name'],
         'Points': r['grade']['points'],
         'Percentage': f"{r['grade']['percentage']}%",
         'Keywords Matched': f"{len(r['grade']['matched_keywords'])}/{len(r['grade']['matched_keywords']) + len(r['grade']['missing_keywords'])}"
@@ -642,10 +760,26 @@ def display_short_answer_results(results):
 
 
 def display_code_results(results):
-    """Display code grading specific results."""
+    """Display code grading specific results with download options."""
+    st.subheader("Code Grading Results")
+
+    # Add download option for all graded files
+    if results:
+        with st.expander("📥 Download Graded Code Files"):
+            for r in results:
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.write(f"**{r['student_name']}** - {r['file_name']} (Score: {r['grade']['points']})")
+                with col2:
+                    content = r.get('content', '')
+                    if content:
+                        st.markdown(get_file_download_link(content, f"{r['student_name']}_{r['file_name']}"),
+                                    unsafe_allow_html=True)
+
     result_data = [{
         'Student ID': r['student_id'],
         'Student Name': r['student_name'],
+        'File': r['file_name'],
         'Points': r['grade']['points'],
         'Percentage': f"{r['grade']['percentage']}%",
         'Passed Tests': f"{r['grade']['passed_tests']}/{r['grade']['total_tests']}"
@@ -701,8 +835,15 @@ def render_plagiarism_page():
         render_file_upload_section()
         return
 
-    st.success(
-        f"Submissions loaded: {len(st.session_state.submissions)} students. You can now configure plagiarism detection.")
+    # Add file change button
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.success(f"Submissions loaded: {len(st.session_state.submissions)} students.")
+    with col2:
+        if st.button("🔄 Change File", type="secondary"):
+            reset_app_state()
+            st.rerun()
+
     st.markdown("---")
 
     st.header("Select Submission Type for Plagiarism Detection")
@@ -736,8 +877,6 @@ def render_text_plagiarism():
             "Similarity Threshold to Flag Plagiarism", 0.5, 1.0, 0.8, 0.05,
             help="Minimum similarity to flag as plagiarism (0.8 recommended)", key="text_plag_thresh"
         )
-        st.info(
-            " text plagiarism detection uses TF-IDF, fingerprinting, and n-gram analysis for improved accuracy.")
         submitted_text_plag = st.form_submit_button("Start Text Plagiarism Detection")
 
         if submitted_text_plag:
@@ -845,8 +984,6 @@ def render_code_plagiarism():
             "Similarity Threshold to Flag Plagiarism", 0.5, 1.0, 0.8, 0.05,
             help="Minimum similarity to flag as plagiarism (0.8 recommended)", key="code_plag_thresh"
         )
-        st.info(
-            "Enhanced code plagiarism detection analyzes AST structure, token sequences, function signatures, and normalized code patterns.")
         submitted_code_plag = st.form_submit_button("Start Code Plagiarism Detection")
 
         if submitted_code_plag:
@@ -887,7 +1024,7 @@ def render_code_plagiarism():
 
 
 def display_text_plagiarism_results(report):
-    """Display text plagiarism results - showing ALL comparisons with highlighting for flagged ones."""
+    """Display text plagiarism results with enhanced table selection and diff viewer."""
     st.markdown("#### Plagiarism Summary (Text)")
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -902,28 +1039,14 @@ def display_text_plagiarism_results(report):
     if report['results']:
         st.markdown("#### All Similarity Results")
         st.markdown(f"🔴 **Red background** = Above threshold ({report['threshold'] * 100}%) - **Potential Plagiarism**")
-        st.markdown("⚪ **White background** = Below threshold - **Acceptable Similarity**")
-
-        # File summary section
-        st.markdown("#### 📁 Files Being Compared")
-        unique_files = set()
-        for r in report['results']:
-            if 'student1_file' in r:
-                unique_files.add(f"{r['student1_name']}: {r['student1_file']}")
-            if 'student2_file' in r:
-                unique_files.add(f"{r['student2_name']}: {r['student2_file']}")
-
-        if unique_files:
-            st.write(f"**{len(unique_files)} unique student-file combinations:**")
-            for file_info in sorted(unique_files):
-                st.write(f"• {file_info}")
 
         st.markdown("---")
 
-        # Create data for all results
+        # Create data for all results with index
         all_data = []
-        for r in report['results']:
+        for idx, r in enumerate(report['results']):
             all_data.append({
+                'Index': idx,
                 'Student 1': r['student1_name'],
                 'Student 1 ID': r['student1_id'],
                 'File 1': r.get('student1_file', 'N/A'),
@@ -931,9 +1054,9 @@ def display_text_plagiarism_results(report):
                 'Student 2 ID': r['student2_id'],
                 'File 2': r.get('student2_file', 'N/A'),
                 'Overall Similarity': f"{r['similarity'] * 100:.2f}%",
-                'TF-IDF Sim.': f"{r.get('tfidf_similarity', 0) * 100:.2f}%",
-                'Fingerprint Sim.': f"{r.get('fingerprint_similarity', 0) * 100:.2f}%",
-                'N-gram Sim.': f"{r.get('ngram_similarity', 0) * 100:.2f}%",
+                'TF-IDF': f"{r.get('tfidf_similarity', 0) * 100:.2f}%",
+                'Fingerprint': f"{r.get('fingerprint_similarity', 0) * 100:.2f}%",
+                'N-gram': f"{r.get('ngram_similarity', 0) * 100:.2f}%",
                 'Status': '🚨 FLAGGED' if r['flagged'] else '✅ OK',
                 'flagged': r['flagged']  # Hidden column for styling
             })
@@ -942,8 +1065,32 @@ def display_text_plagiarism_results(report):
             # Create DataFrame
             df = pd.DataFrame(all_data)
 
-            # Apply styling and remove the hidden 'flagged' column for display
-            display_df = df.drop('flagged', axis=1)
+            # Row selection interface
+            st.markdown("### Select a Comparison to View Details")
+
+            # Create selector options
+            options = []
+            for idx, r in enumerate(report['results']):
+                status = "🚨 FLAGGED" if r['flagged'] else "✅ OK"
+                option = f"{idx + 1}. {r['student1_name']} vs {r['student2_name']} - {r['similarity'] * 100:.1f}% {status}"
+                options.append(option)
+
+            selected_option = st.selectbox("Choose comparison:", ["None"] + options, key="text_comparison_select")
+
+            if selected_option != "None":
+                selected_idx = int(selected_option.split('.')[0]) - 1
+                selected_result = report['results'][selected_idx]
+
+                with st.expander("📄 File Comparison Details", expanded=True):
+                    content1 = selected_result.get('student1_content', 'Content not available')
+                    content2 = selected_result.get('student2_content', 'Content not available')
+                    file1_name = f"{selected_result['student1_name']}_{selected_result.get('student1_file', 'file.txt')}"
+                    file2_name = f"{selected_result['student2_name']}_{selected_result.get('student2_file', 'file.txt')}"
+
+                    show_diff_viewer(content1, content2, file1_name, file2_name)
+
+            # Display the table (without the Index column)
+            display_df = df.drop(['flagged', 'Index'], axis=1)
 
             # Style the dataframe
             styled_df = display_df.style.apply(
@@ -957,24 +1104,35 @@ def display_text_plagiarism_results(report):
 
             st.dataframe(styled_df, use_container_width=True)
 
+            # Add download options for all comparisons
+            with st.expander("📥 Download Files from Comparisons"):
+                for idx, r in enumerate(report['results']):
+                    if r['flagged']:  # Only show flagged comparisons by default
+                        st.markdown(f"**Comparison {idx + 1}: {r['student1_name']} vs {r['student2_name']}**")
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            content1 = r.get('student1_content', '')
+                            if content1:
+                                file1_name = f"{r['student1_name']}_{r.get('student1_file', 'file.txt')}"
+                                st.markdown(get_file_download_link(content1, file1_name), unsafe_allow_html=True)
+                        with col2:
+                            content2 = r.get('student2_content', '')
+                            if content2:
+                                file2_name = f"{r['student2_name']}_{r.get('student2_file', 'file.txt')}"
+                                st.markdown(get_file_download_link(content2, file2_name), unsafe_allow_html=True)
+                        st.markdown("---")
+
             # Summary statistics
             if report['flagged_pairs'] > 0:
                 st.markdown("#### Flagged Pairs Details")
                 flagged_students = set()
-                flagged_files = set()
                 for r in report['results']:
                     if r['flagged']:
                         flagged_students.add(r['student1_name'])
                         flagged_students.add(r['student2_name'])
-                        flagged_files.add(f"{r['student1_name']}: {r.get('student1_file', 'N/A')}")
-                        flagged_files.add(f"{r['student2_name']}: {r.get('student2_file', 'N/A')}")
 
                 st.error(f"⚠️ **{len(flagged_students)} students** involved in potential plagiarism:")
                 st.write(", ".join(sorted(flagged_students)))
-
-                st.markdown("**📄 Files involved in flagged comparisons:**")
-                for file_info in sorted(flagged_files):
-                    st.write(f"• {file_info}")
             else:
                 st.success("🎉 No plagiarism detected above the threshold!")
 
@@ -985,7 +1143,7 @@ def display_text_plagiarism_results(report):
 
 
 def display_code_plagiarism_results(report):
-    """Display code plagiarism results - showing ALL comparisons with highlighting for flagged ones."""
+    """Display code plagiarism results with enhanced table selection and diff viewer."""
     st.markdown("#### Plagiarism Summary (Code)")
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -1001,53 +1159,35 @@ def display_code_plagiarism_results(report):
         st.markdown("#### All Similarity Results")
         st.markdown(f"🔴 **Red background** = Above threshold ({report['threshold'] * 100}%) - **Potential Plagiarism**")
         st.markdown("⚪ **White background** = Below threshold - **Acceptable Similarity**")
-
-        # File summary section
-        st.markdown("#### 📁 Code Files Being Compared")
-        unique_files = set()
-        for r in report['results']:
-            if 'student1_file' in r:
-                unique_files.add(f"{r['student1_name']}: {r['student1_file']}")
-            if 'student2_file' in r:
-                unique_files.add(f"{r['student2_name']}: {r['student2_file']}")
-
-        if unique_files:
-            st.write(f"**{len(unique_files)} unique student-file combinations:**")
-            for file_info in sorted(unique_files):
-                st.write(f"• {file_info}")
+        st.markdown("💡 **Click on a row to view code comparison**")
 
         st.markdown("---")
 
         # Create data for all results
         all_data = []
-        for r in report['results']:
+        for idx, r in enumerate(report['results']):
             row = {
+                'Index': idx,
                 'Student 1': r['student1_name'],
                 'Student 1 ID': r['student1_id'],
                 'File 1': r.get('student1_file', 'N/A'),
                 'Student 2': r['student2_name'],
                 'Student 2 ID': r['student2_id'],
                 'File 2': r.get('student2_file', 'N/A'),
-                'Overall Sim.': f"{r['similarity'] * 100:.2f}%",
+                'Overall': f"{r['similarity'] * 100:.2f}%",
                 'Status': '🚨 FLAGGED' if r['flagged'] else '✅ OK',
                 'flagged': r['flagged']  # Hidden column for styling
             }
 
             # Add available similarity metrics dynamically
             if 'token_similarity' in r:
-                row['Token Sim.'] = f"{r['token_similarity'] * 100:.2f}%"
+                row['Token'] = f"{r['token_similarity'] * 100:.2f}%"
             if 'ast_similarity' in r:
-                row['AST Sim.'] = f"{r['ast_similarity'] * 100:.2f}%"
+                row['AST'] = f"{r['ast_similarity'] * 100:.2f}%"
             if 'structure_similarity' in r:
-                row['Structure Sim.'] = f"{r['structure_similarity'] * 100:.2f}%"
+                row['Structure'] = f"{r['structure_similarity'] * 100:.2f}%"
             if 'normalized_similarity' in r:
-                row['Normalized Sim.'] = f"{r['normalized_similarity'] * 100:.2f}%"
-            if 'method_similarity' in r:
-                row['Method Sim.'] = f"{r['method_similarity'] * 100:.2f}%"
-            if 'class_similarity' in r:
-                row['Class Sim.'] = f"{r['class_similarity'] * 100:.2f}%"
-            if 'function_similarity' in r:
-                row['Function Sim.'] = f"{r['function_similarity'] * 100:.2f}%"
+                row['Normalized'] = f"{r['normalized_similarity'] * 100:.2f}%"
 
             all_data.append(row)
 
@@ -1055,8 +1195,32 @@ def display_code_plagiarism_results(report):
             # Create DataFrame
             df = pd.DataFrame(all_data)
 
-            # Apply styling and remove the hidden 'flagged' column for display
-            display_df = df.drop('flagged', axis=1)
+            # Row selection interface
+            st.markdown("### Select a Comparison to View Code Details")
+
+            # Create selector options
+            options = []
+            for idx, r in enumerate(report['results']):
+                status = "🚨 FLAGGED" if r['flagged'] else "✅ OK"
+                option = f"{idx + 1}. {r['student1_name']} vs {r['student2_name']} - {r['similarity'] * 100:.1f}% {status}"
+                options.append(option)
+
+            selected_option = st.selectbox("Choose comparison:", ["None"] + options, key="code_comparison_select")
+
+            if selected_option != "None":
+                selected_idx = int(selected_option.split('.')[0]) - 1
+                selected_result = report['results'][selected_idx]
+
+                with st.expander("💻 Code Comparison Details", expanded=True):
+                    content1 = selected_result.get('student1_content', 'Code not available')
+                    content2 = selected_result.get('student2_content', 'Code not available')
+                    file1_name = f"{selected_result['student1_name']}_{selected_result.get('student1_file', 'code.txt')}"
+                    file2_name = f"{selected_result['student2_name']}_{selected_result.get('student2_file', 'code.txt')}"
+
+                    show_diff_viewer(content1, content2, file1_name, file2_name)
+
+            # Display the table (without the Index column)
+            display_df = df.drop(['flagged', 'Index'], axis=1)
 
             # Style the dataframe
             styled_df = display_df.style.apply(
@@ -1070,24 +1234,35 @@ def display_code_plagiarism_results(report):
 
             st.dataframe(styled_df, use_container_width=True)
 
+            # Add download options for all comparisons
+            with st.expander("📥 Download Code Files from Comparisons"):
+                for idx, r in enumerate(report['results']):
+                    if r['flagged']:  # Only show flagged comparisons by default
+                        st.markdown(f"**Comparison {idx + 1}: {r['student1_name']} vs {r['student2_name']}**")
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            content1 = r.get('student1_content', '')
+                            if content1:
+                                file1_name = f"{r['student1_name']}_{r.get('student1_file', 'code.txt')}"
+                                st.markdown(get_file_download_link(content1, file1_name), unsafe_allow_html=True)
+                        with col2:
+                            content2 = r.get('student2_content', '')
+                            if content2:
+                                file2_name = f"{r['student2_name']}_{r.get('student2_file', 'code.txt')}"
+                                st.markdown(get_file_download_link(content2, file2_name), unsafe_allow_html=True)
+                        st.markdown("---")
+
             # Summary statistics
             if report['flagged_pairs'] > 0:
                 st.markdown("#### Flagged Pairs Details")
                 flagged_students = set()
-                flagged_files = set()
                 for r in report['results']:
                     if r['flagged']:
                         flagged_students.add(r['student1_name'])
                         flagged_students.add(r['student2_name'])
-                        flagged_files.add(f"{r['student1_name']}: {r.get('student1_file', 'N/A')}")
-                        flagged_files.add(f"{r['student2_name']}: {r.get('student2_file', 'N/A')}")
 
                 st.error(f"⚠️ **{len(flagged_students)} students** involved in potential plagiarism:")
                 st.write(", ".join(sorted(flagged_students)))
-
-                st.markdown("**📄 Code files involved in flagged comparisons:**")
-                for file_info in sorted(flagged_files):
-                    st.write(f"• {file_info}")
             else:
                 st.success("🎉 No plagiarism detected above the threshold!")
 
@@ -1099,7 +1274,7 @@ def display_code_plagiarism_results(report):
 
 
 def create_similarity_heatmap(results, title, color_scale='Blues'):
-    """Create a similarity heatmap for plagiarism results with threshold visualization and file information."""
+    """Create a similarity heatmap for plagiarism results with threshold visualization."""
     if not results:
         return
 
@@ -1166,7 +1341,7 @@ def create_similarity_heatmap(results, title, color_scale='Blues'):
             yaxis_title="Students"
         )
 
-        # Add text annotations for high similarity values with file info
+        # Add text annotations for high similarity values
         for i, student1 in enumerate(student_list):
             for j, student2 in enumerate(student_list):
                 if i != j:  # Skip diagonal
@@ -1174,9 +1349,9 @@ def create_similarity_heatmap(results, title, color_scale='Blues'):
                     if similarity_val >= threshold * 100:
                         fig.add_annotation(
                             x=j, y=i,
-                            text=f"{similarity_val:.1f}%<br><sub>{student_file_map.get(student1, 'N/A')[:10]}... vs<br>{student_file_map.get(student2, 'N/A')[:10]}...</sub>",
+                            text=f"{similarity_val:.1f}%",
                             showarrow=False,
-                            font=dict(color="white", size=8, family="Arial Black")
+                            font=dict(color="white", size=10, family="Arial Black")
                         )
 
         # Update hover template to show file information
@@ -1187,23 +1362,6 @@ def create_similarity_heatmap(results, title, color_scale='Blues'):
         )
 
         st.plotly_chart(fig, use_container_width=True)
-
-        # Add a detailed comparison table for flagged pairs
-        flagged_comparisons = [r for r in results if r['flagged']]
-        if flagged_comparisons:
-            st.markdown("#### 🚨 Detailed File Comparison for Flagged Pairs")
-            detailed_data = []
-            for r in flagged_comparisons:
-                detailed_data.append({
-                    'Student 1': r['student1_name'],
-                    'File 1': r.get('student1_file', 'N/A'),
-                    'Student 2': r['student2_name'],
-                    'File 2': r.get('student2_file', 'N/A'),
-                    'Similarity': f"{r['similarity'] * 100:.2f}%"
-                })
-
-            detailed_df = pd.DataFrame(detailed_data)
-            st.dataframe(detailed_df, use_container_width=True)
 
 
 def render_report_page():
@@ -1306,6 +1464,27 @@ def render_report_page():
                         )
                 except Exception as e:
                     st.error(f"Could not prepare {report_name} for download: {e}")
+
+    # Add custom CSS for download links
+    st.markdown("""
+    <style>
+    .download-link {
+        display: inline-block;
+        padding: 0.25rem 0.75rem;
+        background-color: #0068c9;
+        color: white;
+        text-decoration: none;
+        border-radius: 0.25rem;
+        font-size: 0.875rem;
+        transition: background-color 0.2s;
+    }
+    .download-link:hover {
+        background-color: #0051a2;
+        color: white;
+        text-decoration: none;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
 
 # Main page rendering
